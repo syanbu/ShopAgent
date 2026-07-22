@@ -17,8 +17,7 @@
 
 | 功能 | 状态 | 功能文档 | 代码入口 |
 |---|---|---|---|
-
-当前还没有进入开发阶段的功能。
+| 单轮文本商品推荐工作流 | 提议 | [features/text-shopping-workflow.md](features/text-shopping-workflow.md) | 尚未创建 |
 
 ## 更新规则
 
