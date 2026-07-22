@@ -1,0 +1,701 @@
+import json
+from http import HTTPStatus
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from shop_agent.catalog import ProductCatalog
+from shop_agent.cli.index_products import index_catalog
+from shop_agent.config import Settings
+from shop_agent.errors import ServiceError
+from shop_agent.models.query import SearchConstraints
+from shop_agent.models.retrieval import EvidenceChunk
+from shop_agent.services.dashscope_chat import (
+    DashScopeEvidenceMapper,
+    DashScopeIntentParser,
+    DashScopeResponseGenerator,
+)
+from shop_agent.services.dashscope_embedding import DashScopeEmbedder
+from shop_agent.services.dashscope_rerank import DashScopeReranker
+
+
+@pytest.fixture
+def settings(tmp_path: Path) -> Settings:
+    return Settings(
+        dashscope_api_key="test-key",
+        dataset_root=tmp_path,
+        model_timeout_seconds=7,
+    )
+
+
+def _chat_response(content: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="chatcmpl-test",
+        model="qwen3.7-max",
+        created=0,
+        choices=[
+            SimpleNamespace(
+                index=0,
+                finish_reason="stop",
+                message=SimpleNamespace(role="assistant", content=content),
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_intent_parser_uses_json_mode_and_disables_thinking(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(
+        return_value=_chat_response(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "intent": "product_search",
+                    "retrieval_query": "蓝牙耳机",
+                    "category": "数码电子",
+                    "sub_category": "蓝牙耳机",
+                    "constraints": {},
+                },
+                ensure_ascii=False,
+            )
+        )
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch(
+        "shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client
+    ) as ctor:
+        result = await DashScopeIntentParser(settings).parse("推荐蓝牙耳机")
+
+    ctor.assert_called_once_with(
+        base_url=settings.dashscope_base_url,
+        api_key="test-key",
+        timeout=7,
+    )
+    kwargs = create.await_args.kwargs
+    assert kwargs["model"] == "qwen3.7-max"
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["extra_body"] == {"enable_thinking": False}
+    assert result.retrieval_query == "蓝牙耳机"
+
+
+@pytest.mark.asyncio
+async def test_intent_parser_retries_invalid_json_only_once(settings: Settings) -> None:
+    create = AsyncMock(
+        side_effect=[
+            _chat_response("not-json"),
+            _chat_response(
+                '{"schema_version":1,"intent":"non_shopping",'
+                '"retrieval_query":null,"category":null,"sub_category":null,'
+                '"constraints":{}}'
+            ),
+        ]
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        result = await DashScopeIntentParser(settings).parse("你好")
+
+    assert result.intent == "non_shopping"
+    assert create.await_count == 2
+    retry_messages = create.await_args_list[1].kwargs["messages"]
+    assert "not-json" in retry_messages[-1]["content"]
+    assert "validation" in retry_messages[-1]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_intent_parser_maps_second_invalid_output_to_service_error(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(side_effect=[_chat_response("bad-1"), _chat_response("bad-2")])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeIntentParser(settings).parse("推荐耳机")
+
+    assert error.value.code == "INTENT_PARSE_FAILED"
+    assert error.value.retryable is True
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(
+        return_value=_chat_response(
+            '{"product_id":"p1","checks":[{"condition":"防水",'
+            '"status":"supported","evidence_ids":["faq-1"],'
+            '"conflicting_evidence_ids":["review-1"]}]}'
+        )
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    evidence = [
+        EvidenceChunk(
+            chunk_id="faq-1",
+            point_id="00000000-0000-0000-0000-000000000001",
+            product_id="p1",
+            chunk_type="official_faq",
+            text="官方说明支持防水",
+            source_path="p1.json",
+        ),
+        EvidenceChunk(
+            chunk_id="review-1",
+            point_id="00000000-0000-0000-0000-000000000002",
+            product_id="p1",
+            chunk_type="user_review",
+            text="用户称不防水",
+            source_path="p1.json",
+        ),
+    ]
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        assessment = await DashScopeEvidenceMapper(settings).map_conditions(
+            "p1", SearchConstraints(required_features=["防水"]), evidence
+        )
+
+    prompt = create.await_args.kwargs["messages"][-1]["content"]
+    assert "official_faq > product_summary > user_review" in prompt
+    assert "never use a user review to prove an official specification" in prompt
+    assert all(
+        value in prompt for value in ("faq-1", "official_faq", "官方说明支持防水")
+    )
+    assert assessment.checks[0].conflicting_evidence_ids == ["review-1"]
+
+
+@pytest.mark.asyncio
+async def test_evidence_mapper_maps_upstream_failure_to_parse_error(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(side_effect=RuntimeError("secret upstream detail"))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeEvidenceMapper(settings).map_conditions(
+                "p1", SearchConstraints(), []
+            )
+
+    assert error.value.code == "EVIDENCE_PARSE_FAILED"
+    assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_response_generator_yields_only_nonempty_text_deltas(
+    settings: Settings,
+) -> None:
+    async def stream_response():
+        for content in (None, "", "推荐", "这款商品"):
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=content))]
+            )
+
+    create = AsyncMock(return_value=stream_response())
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        chunks = [
+            chunk
+            async for chunk in DashScopeResponseGenerator(settings).stream("verified")
+        ]
+
+    assert chunks == ["推荐", "这款商品"]
+    kwargs = create.await_args.kwargs
+    assert kwargs["stream"] is True
+    assert kwargs["extra_body"] == {"enable_thinking": False}
+
+
+@pytest.mark.asyncio
+async def test_response_generator_hides_upstream_error_details(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(side_effect=RuntimeError("secret upstream detail"))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        with pytest.raises(ServiceError) as error:
+            async for _ in DashScopeResponseGenerator(settings).stream("verified"):
+                pass
+
+    assert error.value.code == "GENERATION_FAILED"
+    assert error.value.message == "upstream generation error"
+    assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_document_and_query_embeddings_use_distinct_text_types(
+    settings: Settings,
+) -> None:
+    document_response = SimpleNamespace(
+        status_code=HTTPStatus.OK,
+        request_id="embed-doc",
+        output={
+            "embeddings": [
+                {"text_index": 0, "embedding": [0.1] * 1024},
+                {"text_index": 1, "embedding": [0.2] * 1024},
+            ]
+        },
+        usage={"total_tokens": 2},
+        message="",
+    )
+    query_response = SimpleNamespace(
+        status_code=HTTPStatus.OK,
+        request_id="embed-query",
+        output={"embeddings": [{"text_index": 0, "embedding": [0.3] * 1024}]},
+        usage={"total_tokens": 1},
+        message="",
+    )
+    with patch(
+        "shop_agent.services.dashscope_embedding.dashscope.TextEmbedding.call"
+    ) as call:
+        call.side_effect = [document_response, query_response]
+        embedder = DashScopeEmbedder(settings)
+        documents = await embedder.embed_documents(["a", "b"])
+        query = await embedder.embed_query("q")
+
+    document_kwargs = call.call_args_list[0].kwargs
+    query_kwargs = call.call_args_list[1].kwargs
+    assert document_kwargs == {
+        "api_key": "test-key",
+        "model": "qwen3.7-text-embedding",
+        "input": ["a", "b"],
+        "dimension": 1024,
+        "text_type": "document",
+        "output_type": "dense",
+    }
+    assert query_kwargs["text_type"] == "query"
+    assert query_kwargs["dimension"] == 1024
+    assert query_kwargs["output_type"] == "dense"
+    assert len(documents[0]) == len(query) == 1024
+
+
+@pytest.mark.asyncio
+async def test_document_embeddings_restore_input_order_from_text_index(
+    settings: Settings,
+) -> None:
+    response = SimpleNamespace(
+        status_code=HTTPStatus.OK,
+        request_id="embed-reversed",
+        output={
+            "embeddings": [
+                {"text_index": 1, "embedding": [0.2] * 1024},
+                {"text_index": 0, "embedding": [0.1] * 1024},
+            ]
+        },
+        usage={"total_tokens": 2},
+        message="",
+    )
+    with patch(
+        "shop_agent.services.dashscope_embedding.dashscope.TextEmbedding.call",
+        return_value=response,
+    ):
+        vectors = await DashScopeEmbedder(settings).embed_documents(["first", "second"])
+
+    assert vectors == [[0.1] * 1024, [0.2] * 1024]
+
+
+def _embedding_success_response(embeddings: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        status_code=HTTPStatus.OK,
+        request_id="embed-malformed",
+        output={"embeddings": embeddings},
+        usage={"total_tokens": 2},
+        message="",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "texts"),
+    [
+        pytest.param(
+            SimpleNamespace(
+                status_code=HTTPStatus.OK,
+                request_id="missing-output",
+                usage={"total_tokens": 2},
+                message="",
+            ),
+            ["a", "b"],
+            id="missing-output",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                status_code=HTTPStatus.OK,
+                request_id="missing-embeddings",
+                output={},
+                usage={"total_tokens": 2},
+                message="",
+            ),
+            ["a", "b"],
+            id="missing-embeddings",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [{"text_index": 0}, {"text_index": 1, "embedding": [0.2] * 1024}]
+            ),
+            ["a", "b"],
+            id="missing-embedding",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [
+                    {"embedding": [0.1] * 1024},
+                    {"text_index": 1, "embedding": [0.2] * 1024},
+                ]
+            ),
+            ["a", "b"],
+            id="missing-text-index",
+        ),
+        pytest.param(
+            _embedding_success_response([{"text_index": 0, "embedding": [0.1] * 1024}]),
+            ["a", "b"],
+            id="short-results",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [
+                    {"text_index": 0, "embedding": [0.1] * 1024},
+                    {"text_index": 0, "embedding": [0.2] * 1024},
+                ]
+            ),
+            ["a", "b"],
+            id="duplicate-index",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [
+                    {"text_index": 0, "embedding": [0.1] * 1024},
+                    {"text_index": 2, "embedding": [0.2] * 1024},
+                ]
+            ),
+            ["a", "b"],
+            id="out-of-range-index",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [
+                    {"text_index": 0, "embedding": [0.1] * 1023},
+                    {"text_index": 1, "embedding": [0.2] * 1024},
+                ]
+            ),
+            ["a", "b"],
+            id="wrong-dimension",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [{"text_index": 0, "embedding": [0.1] * 1023 + [True]}]
+            ),
+            ["a"],
+            id="bool-vector-element",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [{"text_index": 0, "embedding": [0.1] * 1023 + ["bad"]}]
+            ),
+            ["a"],
+            id="nonnumeric-vector-element",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [{"text_index": 0, "embedding": [0.1] * 1023 + [float("inf")]}]
+            ),
+            ["a"],
+            id="infinite-vector-element",
+        ),
+        pytest.param(
+            _embedding_success_response(
+                [{"text_index": 0, "embedding": [0.1] * 1023 + [float("nan")]}]
+            ),
+            ["a"],
+            id="nan-vector-element",
+        ),
+    ],
+)
+async def test_embedding_malformed_success_is_normalized(
+    settings: Settings,
+    response: SimpleNamespace,
+    texts: list[str],
+) -> None:
+    with patch(
+        "shop_agent.services.dashscope_embedding.dashscope.TextEmbedding.call",
+        return_value=response,
+    ):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeEmbedder(settings).embed_documents(texts)
+
+    assert error.value.code == "EMBEDDING_UNAVAILABLE"
+    assert error.value.message == "invalid embedding response"
+    assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_embedder_preserves_normalized_service_error(settings: Settings) -> None:
+    expected = ServiceError(
+        "EMBEDDING_UNAVAILABLE", "already normalized", retryable=True
+    )
+    with patch(
+        "shop_agent.services.dashscope_embedding.dashscope.TextEmbedding.call",
+        side_effect=expected,
+    ):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeEmbedder(settings).embed_query("q")
+
+    assert error.value is expected
+
+
+@pytest.mark.asyncio
+async def test_embedding_failure_is_retryable(settings: Settings) -> None:
+    response = SimpleNamespace(
+        status_code=HTTPStatus.BAD_GATEWAY,
+        request_id="failed",
+        output={},
+        usage={},
+        message="temporarily unavailable",
+    )
+    with patch(
+        "shop_agent.services.dashscope_embedding.dashscope.TextEmbedding.call",
+        return_value=response,
+    ):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeEmbedder(settings).embed_query("q")
+
+    assert error.value.code == "EMBEDDING_UNAVAILABLE"
+    assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_reranker_uses_qwen3_contract(settings: Settings) -> None:
+    response = SimpleNamespace(
+        status_code=HTTPStatus.OK,
+        request_id="rerank",
+        output={
+            "results": [
+                {"index": 1, "relevance_score": 0.9},
+                {"index": 0, "relevance_score": 0.4},
+            ]
+        },
+        usage={"total_tokens": 3},
+        message="",
+    )
+    with patch(
+        "shop_agent.services.dashscope_rerank.dashscope.TextReRank.call",
+        return_value=response,
+    ) as call:
+        result = await DashScopeReranker(settings).rerank("q", ["a", "b"])
+
+    assert call.call_args.kwargs == {
+        "api_key": "test-key",
+        "model": "qwen3-rerank",
+        "query": "q",
+        "documents": ["a", "b"],
+        "top_n": 2,
+        "return_documents": False,
+        "instruct": "Rank products by how well they satisfy the shopping request.",
+    }
+    assert result == [(1, 0.9), (0, 0.4)]
+
+
+def _rerank_success_response(results: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        status_code=HTTPStatus.OK,
+        request_id="rerank-malformed",
+        output={"results": results},
+        usage={"total_tokens": 3},
+        message="",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(
+            SimpleNamespace(
+                status_code=HTTPStatus.OK,
+                request_id="missing-output",
+                usage={"total_tokens": 3},
+                message="",
+            ),
+            id="missing-output",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                status_code=HTTPStatus.OK,
+                request_id="missing-results",
+                output={},
+                usage={"total_tokens": 3},
+                message="",
+            ),
+            id="missing-results",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [{"relevance_score": 0.9}, {"index": 0, "relevance_score": 0.4}]
+            ),
+            id="missing-index",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [{"index": 1}, {"index": 0, "relevance_score": 0.4}]
+            ),
+            id="missing-score",
+        ),
+        pytest.param(
+            _rerank_success_response([{"index": 0, "relevance_score": 0.4}]),
+            id="short-results",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [
+                    {"index": 0, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            ),
+            id="duplicate-index",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [
+                    {"index": 2, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            ),
+            id="out-of-range-index",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [
+                    {"index": True, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            ),
+            id="bool-index",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [
+                    {"index": 1, "relevance_score": True},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            ),
+            id="bool-score",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [
+                    {"index": 1, "relevance_score": "bad"},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            ),
+            id="nonnumeric-score",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [
+                    {"index": 1, "relevance_score": float("inf")},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            ),
+            id="infinite-score",
+        ),
+        pytest.param(
+            _rerank_success_response(
+                [
+                    {"index": 1, "relevance_score": float("nan")},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            ),
+            id="nan-score",
+        ),
+    ],
+)
+async def test_rerank_malformed_success_is_normalized(
+    settings: Settings,
+    response: SimpleNamespace,
+) -> None:
+    with patch(
+        "shop_agent.services.dashscope_rerank.dashscope.TextReRank.call",
+        return_value=response,
+    ):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeReranker(settings).rerank("q", ["a", "b"])
+
+    assert error.value.code == "RERANK_UNAVAILABLE"
+    assert error.value.message == "invalid rerank response"
+    assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_reranker_preserves_normalized_service_error(settings: Settings) -> None:
+    expected = ServiceError("RERANK_UNAVAILABLE", "already normalized", retryable=True)
+    with patch(
+        "shop_agent.services.dashscope_rerank.dashscope.TextReRank.call",
+        side_effect=expected,
+    ):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeReranker(settings).rerank("q", ["a"])
+
+    assert error.value is expected
+
+
+@pytest.mark.asyncio
+async def test_indexer_batches_at_twenty_and_uses_chunk_uuid_ids(
+    settings: Settings, sample_dataset_root: Path
+) -> None:
+    catalog = ProductCatalog.load(sample_dataset_root)
+    chunks = [
+        EvidenceChunk(
+            chunk_id=f"c-{index}",
+            point_id=f"00000000-0000-0000-0000-{index:012d}",
+            product_id="p_digital_001",
+            chunk_type="product_summary",
+            text=f"text-{index}",
+            source_path="source.json",
+        )
+        for index in range(41)
+    ]
+    embedder = SimpleNamespace(
+        embed_documents=AsyncMock(
+            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+        )
+    )
+    store = SimpleNamespace(ensure_collection=AsyncMock(), upsert=AsyncMock())
+
+    summary = await index_catalog(
+        settings,
+        catalog=catalog,
+        embedder=embedder,
+        store=store,
+        chunks=chunks,
+    )
+
+    assert [len(call.args[0]) for call in embedder.embed_documents.await_args_list] == [
+        20,
+        20,
+        1,
+    ]
+    points = [point for call in store.upsert.await_args_list for point in call.args[0]]
+    assert [str(point.id) for point in points] == [chunk.point_id for chunk in chunks]
+    assert points[0].payload["min_sku_price"] == 399.0
+    assert points[0].payload["max_sku_price"] == 599.0
+    assert summary == {"products": 1, "chunks": 41, "upserted_points": 41}

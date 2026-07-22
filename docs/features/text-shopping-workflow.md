@@ -1,8 +1,8 @@
 # 单轮文本商品推荐工作流
 
-> 状态：提议
+> 状态：开发中
 >
-> 代码入口：尚未创建
+> 代码入口：`src/shop_agent/models/`, `src/shop_agent/catalog.py`, `src/shop_agent/chunking.py`, `src/shop_agent/services/`, `src/shop_agent/cli/index_products.py`, `compose.yaml`
 
 ## 功能目标
 
@@ -218,7 +218,7 @@ Qwen3.7-Max 只生成 `ParsedIntent`，图状态由代码维护。结构化输�
 
 ## 代码与验证
 
-代码尚未创建。实现需要分别提供 FastAPI 对话接口、LangGraph 图定义、商品目录、索引构建、Qdrant 检索、证据校验和 SSE 事件模型，完成后将实际入口写回本文档。
+基础配置、Schema、商品目录、DashScope 模型网关、Qdrant 集合管理与离线索引入口已创建；在线检索、证据工作流和 API 等尚待后续任务实现。离线索引使用 `python -m shop_agent.cli.index_products`，以不超过 20 条的批次生成 1024 维文档向量，并按稳定 UUID point ID 幂等 upsert 到 `product_text_chunks_v1`。本地 Qdrant 由 `compose.yaml` 启动；索引器不会删除或重建已有生产集合。
 
 实现后至少覆盖以下验证：
 
@@ -238,4 +238,8 @@ Qwen3.7-Max 只生成 `ParsedIntent`，图状态由代码维护。结构化输�
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
+| 2026-07-22 | 建立配置、错误、商品、意图、检索、SSE 与图状态基础 Schema | 为后续索引、检索和工作流提供类型契约 |
 | 2026-07-22 | 创建第一阶段单轮文本商品推荐设计 | 先跑通文本 RAG 与工作流编排，再增加多轮和图片能力 |
+| 2026-07-22 | 添加商品目录与本地图片文件解析入口（开发中） | 从商品 JSON 建立内存目录，按 SKU 预算筛选并安全解析相对图片路径 |
+| 2026-07-22 | 添加确定性证据切块入口（开发中） | 为商品摘要、官方问答和用户评价生成稳定的 UUID5 点位 ID 与原始 JSON 路径 |
+| 2026-07-23 | 添加 DashScope 网关、Qdrant 存储与离线索引入口（开发中） | 固化结构化输出、向量、重排和版本化证据集合契约，为后续在线检索工作流提供外部服务边界 |
