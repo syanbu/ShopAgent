@@ -44,7 +44,7 @@ class DashScopeReranker:
             if response.status_code != HTTPStatus.OK:
                 raise ServiceError(
                     "RERANK_UNAVAILABLE",
-                    str(response.message),
+                    "upstream reranking error",
                     retryable=True,
                 )
             results = response.output["results"]

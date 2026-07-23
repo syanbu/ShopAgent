@@ -50,7 +50,7 @@ class DashScopeEmbedder:
             if response.status_code != HTTPStatus.OK:
                 raise ServiceError(
                     "EMBEDDING_UNAVAILABLE",
-                    str(response.message),
+                    "upstream embedding error",
                     retryable=True,
                 )
             embeddings = response.output["embeddings"]

@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from shop_agent.models.product import Product
 
@@ -32,6 +32,12 @@ class EvidenceCheck(BaseModel):
     status: Literal["supported", "contradicted", "unknown"]
     evidence_ids: list[str] = Field(default_factory=list)
     conflicting_evidence_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def supported_requires_evidence(self) -> "EvidenceCheck":
+        if self.status == "supported" and not self.evidence_ids:
+            raise ValueError("supported check requires evidence")
+        return self
 
 
 class EvidenceAssessment(BaseModel):

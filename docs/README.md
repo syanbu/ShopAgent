@@ -17,7 +17,7 @@
 
 | 功能 | 状态 | 功能文档 | 代码入口 |
 |---|---|---|---|
-| 单轮文本商品推荐工作流 | 开发中 | [features/text-shopping-workflow.md](features/text-shopping-workflow.md) | `src/shop_agent/models/`, `src/shop_agent/catalog.py`, `src/shop_agent/chunking.py`, `src/shop_agent/services/`, `src/shop_agent/cli/index_products.py`, `compose.yaml` |
+| 单轮文本商品推荐工作流 | 已完成 | [features/text-shopping-workflow.md](features/text-shopping-workflow.md) | `src/shop_agent/models/`, `src/shop_agent/catalog.py`, `src/shop_agent/chunking.py`, `src/shop_agent/services/`, `src/shop_agent/workflow/`, `src/shop_agent/api/`, `src/shop_agent/cli/index_products.py`, `tests/live/test_live_shopping_flow.py`, `compose.yaml` |
 
 ## 更新规则
 

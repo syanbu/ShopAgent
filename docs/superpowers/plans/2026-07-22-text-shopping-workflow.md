@@ -964,7 +964,7 @@ Expected: the integration test creates a uniquely named test collection, upserts
 
 **Interfaces:**
 - Consumes: catalog, embedder, Qdrant store, reranker, evidence mapper, `ParsedIntent`.
-- Produces: async `retrieve_chunks(intent) -> list[RetrievedChunk]`, synchronous `aggregate_products(chunks) -> list[ProductCandidate]`, async `rerank_candidates(query, candidates) -> list[ProductCandidate]`, async `validate_candidates(candidates, constraints) -> list[ValidatedCandidate]`, and synchronous `select_candidates(validated, limit) -> list[SelectedProduct]`.
+- Produces: async `retrieve_chunks(intent) -> list[RetrievedChunk]`, synchronous `aggregate_products(chunks) -> list[ProductCandidate]`, async `rerank_candidates(query, candidates) -> list[ProductCandidate]`, async `validate_candidates(candidates, constraints) -> list[ValidatedCandidate]`, and synchronous `select_candidates(validated, constraints, limit) -> list[SelectedProduct]`.
 
 - [ ] **Step 1: Write failing retrieval and evidence tests**
 
@@ -982,6 +982,7 @@ async def test_required_unknown_feature_rejects_candidate() -> None:
     selected = evidence_service.select_candidates(
         validated=[validated_required_unknown],
         limit=3,
+        constraints=SearchConstraints(required_features=["防水"]),
     )
     assert selected == []
 
@@ -990,6 +991,7 @@ async def test_excluded_unknown_feature_rejects_candidate() -> None:
     selected = evidence_service.select_candidates(
         validated=[validated_excluded_unknown],
         limit=3,
+        constraints=SearchConstraints(excluded_features=["入耳式"]),
     )
     assert selected == []
 
@@ -998,6 +1000,7 @@ async def test_no_semantic_constraints_selects_rerank_top_three() -> None:
     selected = evidence_service.select_candidates(
         validated=eligible_ranked_candidates,
         limit=3,
+        constraints=SearchConstraints(),
     )
     assert [item.product_id for item in selected] == ["p3", "p2", "p1"]
 
@@ -1055,7 +1058,7 @@ def semantic_checks_pass(
 
 For excluded features, the evidence-mapping prompt defines `supported` as “the evidence explicitly supports that the product does not contain or have the excluded feature.” This prevents a missing mention from being treated as safe.
 
-`select_candidates` reads only eligible `ValidatedCandidate` objects. For each accepted product, it sets `matched_sku_ids` from the catalog's exact price filtering, keeps rerank score, includes only decisive verified evidence IDs, and records concise decision reason codes. It returns at most three products in rerank order. Structured catalog fields always override textual statements about price, SKU, brand, category, and image; conflicting text must not enter a product event.
+`select_candidates` requires the same `SearchConstraints` used during validation and reads only eligible `ValidatedCandidate` objects. For each accepted product, it sets `matched_sku_ids` from the catalog's exact price filtering, keeps rerank score, includes only decisive verified evidence IDs, and records concise decision reason codes. It returns at most three products in rerank order. Structured catalog fields always override textual statements about price, SKU, brand, category, and image; conflicting text must not enter a product event.
 
 - [ ] **Step 5: Verify the decision layer**
 

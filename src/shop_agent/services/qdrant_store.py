@@ -1,5 +1,7 @@
 from collections.abc import Sequence
 from math import ceil
+from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import ValidationError
 from qdrant_client import AsyncQdrantClient
@@ -19,9 +21,13 @@ class QdrantStore:
         client: AsyncQdrantClient | None = None,
     ) -> None:
         self._settings = settings
+        client_options: dict[str, Any] = {}
+        if urlparse(settings.qdrant_url).hostname in {"127.0.0.1", "::1", "localhost"}:
+            client_options["trust_env"] = False
         self._client = client or AsyncQdrantClient(
             url=settings.qdrant_url,
             timeout=ceil(settings.qdrant_timeout_seconds),
+            **client_options,
         )
 
     async def ensure_collection(self) -> None:
@@ -48,6 +54,19 @@ class QdrantStore:
                 field_name=field_name,
                 field_schema=field_schema,
             )
+
+    async def collection_ready(self) -> bool:
+        collection_name = self._settings.qdrant_collection
+        if not await self._client.collection_exists(collection_name):
+            return False
+        info = await self._client.get_collection(collection_name)
+        vectors = info.config.params.vectors
+        return (
+            (info.points_count or 0) > 0
+            and isinstance(vectors, models.VectorParams)
+            and vectors.size == self._settings.embedding_dimension
+            and vectors.distance == models.Distance.COSINE
+        )
 
     @staticmethod
     def build_filter(

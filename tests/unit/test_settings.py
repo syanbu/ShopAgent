@@ -1,6 +1,9 @@
 import tomllib
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from shop_agent.config import Settings
 
 
@@ -20,3 +23,9 @@ def test_project_does_not_declare_an_unimplemented_console_script() -> None:
         project = tomllib.load(pyproject_file)["project"]
 
     assert "scripts" not in project
+
+
+@pytest.mark.parametrize("limit", [0, 4])
+def test_final_product_limit_stays_within_card_contract(limit: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(dashscope_api_key="test-key", final_product_limit=limit)

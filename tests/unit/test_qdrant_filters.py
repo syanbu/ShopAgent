@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from qdrant_client.http import models
@@ -12,6 +12,13 @@ from shop_agent.services.qdrant_store import QdrantStore
 
 def _settings() -> Settings:
     return Settings(dashscope_api_key="test-key", retrieval_chunk_limit=17)
+
+
+def test_local_qdrant_client_ignores_environment_proxy() -> None:
+    with patch("shop_agent.services.qdrant_store.AsyncQdrantClient") as client_type:
+        QdrantStore(_settings())
+
+    assert client_type.call_args.kwargs["trust_env"] is False
 
 
 def test_build_filter_maps_category_brand_and_price_constraints() -> None:
@@ -77,6 +84,52 @@ async def test_ensure_collection_does_not_recreate_existing_collection() -> None
 
     client.create_collection.assert_not_awaited()
     client.delete_collection.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_collection_ready_requires_nonempty_matching_vector_config() -> None:
+    client = AsyncMock()
+    client.collection_exists.return_value = True
+    client.get_collection.return_value = SimpleNamespace(
+        points_count=1,
+        config=SimpleNamespace(
+            params=SimpleNamespace(
+                vectors=models.VectorParams(
+                    size=1024,
+                    distance=models.Distance.COSINE,
+                )
+            )
+        ),
+    )
+
+    ready = await QdrantStore(_settings(), client=client).collection_ready()
+
+    assert ready is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("points_count", "dimension"), [(0, 1024), (1, 768)])
+async def test_collection_ready_rejects_empty_or_incompatible_collection(
+    points_count: int,
+    dimension: int,
+) -> None:
+    client = AsyncMock()
+    client.collection_exists.return_value = True
+    client.get_collection.return_value = SimpleNamespace(
+        points_count=points_count,
+        config=SimpleNamespace(
+            params=SimpleNamespace(
+                vectors=models.VectorParams(
+                    size=dimension,
+                    distance=models.Distance.COSINE,
+                )
+            )
+        ),
+    )
+
+    ready = await QdrantStore(_settings(), client=client).collection_ready()
+
+    assert ready is False
 
 
 @pytest.mark.asyncio
