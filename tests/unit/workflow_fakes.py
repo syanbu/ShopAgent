@@ -13,6 +13,7 @@ from shop_agent.models.retrieval import (
     SelectedProduct,
     ValidatedCandidate,
 )
+from shop_agent.models.state import ShoppingState
 
 
 class FakeIntentParser:
@@ -35,7 +36,10 @@ class FakeIntentParser:
             retrieval_query=message,
             category="数码电子",
             sub_category="蓝牙耳机",
-            constraints=SearchConstraints(max_price=500),
+            constraints=SearchConstraints(
+                max_price=None if "性价比" in message else 500,
+                price_preference="value" if "性价比" in message else None,
+            ),
         )
 
 
@@ -201,7 +205,7 @@ def build_harness(
     )
 
 
-def initial_state(message: str) -> dict[str, str]:
+def initial_state(message: str) -> ShoppingState:
     return {
         "request_id": "request-fixed",
         "conversation_id": "conversation-fixed",

@@ -43,6 +43,9 @@ START
   -> route_intent
        -> non_shopping -> generate_response -> END
        -> product_search
+            -> compile_query
+                 -> needs_clarification -> generate_clarification -> END
+                 -> compiled
             -> retrieve_chunks
             -> aggregate_products
             -> semantic_rerank
@@ -53,6 +56,8 @@ START
 ```
 
 `route_intent` 使用 LangGraph 条件边。非购物输入跳过 Embedding、Qdrant、重排序和证据校验。商品条件较少但品类明确时直接推荐，不触发追问。检索无结果或证据校验后没有合格商品时，跳过后续候选决策并生成无结果回复。
+
+`compile_query` 在购物意图路由后执行确定性约束编译，不调用模型、Embedding 或 Qdrant。用户表达“性价比高”但缺少有效子品类时，工作流直接发送“请明确想购买的商品类型，例如手机、T恤或耳机。”，并跳过完整检索链路。该澄清不保存上下文。
 
 每个节点只读取图状态并返回自身负责的局部更新。同一节点不混用静态边和动态路由。
 
@@ -121,6 +126,7 @@ Qwen3.7-Max 只生成 `ParsedIntent`，图状态由代码维护。结构化输�
   "constraints": {
     "min_price": null,
     "max_price": 500.0,
+    "price_preference": null,
     "include_brands": [],
     "exclude_brands": [],
     "required_features": [],
@@ -130,6 +136,10 @@ Qwen3.7-Max 只生成 `ParsedIntent`，图状态由代码维护。结构化输�
 ```
 
 `retrieval_query` 是面向向量检索的改写文本，保留品类、使用场景和正向需求。价格、品牌和排除项进入 `constraints`，原始用户文本始终保留在图状态中。非购物输入的 `intent` 为 `non_shopping`，检索字段使用空值。
+
+`price_preference` 仅接受 `"value"` 或 `null`。“性价比高”及语义等价表达映射为 `"value"`，不能同时进入 `required_features`、`excluded_features` 或 `retrieval_query`。模型只识别语义，实际价格由后端编译。
+
+Catalog 启动加载时按 `category + sub_category` 建立只读价格基准。每个商品只贡献其最低 SKU 价格，组内取中位数并乘以 `1.2`，金额保留两位小数。明确最高价与统计上限同时存在时取较小值；明确最低价高于统计上限时保留用户数字并跳过统计上限。当前数据验收基准为智能手机 `7249.00 / 8698.80`、短袖T恤 `129.00 / 154.80`。
 
 意图识别提示词携带由 `ParsedIntent.model_json_schema()` 生成的完整 JSON Schema。模型字段描述明确区分最低价格、最高价格、品牌、必需属性和排除属性；用户明确表达的约束必须全部进入 `constraints`，只有未表达对应边界时，价格字段才允许为 `null`。
 
@@ -143,12 +153,15 @@ Qwen3.7-Max 只生成 `ParsedIntent`，图状态由代码维护。结构化输�
 
 - `request_id`、`conversation_id` 和原始用户文本。
 - `parsed_intent`。
+- 原始 `constraints`、后端生成的 `effective_constraints` 和可选 `price_reference`。
 - Qdrant 返回的证据 Chunk。
 - 按 `product_id` 聚合后的商品候选。
 - 重排序分数和证据校验结果。
 - 最终商品、回复模式和错误信息。
 
 第一阶段不在图状态中保存历史消息、历史候选、指代信息或多轮查询快照。后续多轮功能复用 `constraints`，并新增本轮增量 `TurnQuery` 与合并结果 `QuerySnapshot`。
+
+检索、Catalog SKU 筛选、证据校验和候选选择统一读取 `effective_constraints`，各节点不得重复计算性价比价格。`price_reference` 记录子品类、样本数、中位数、倍率、计算上限、是否应用及跳过原因，用于单行 JSON 日志和后续多轮重新编译。
 
 ### 商品事实源
 
@@ -335,6 +348,9 @@ Unicode 分隔符。用户提供的关联标识不能拆分或伪造额外日志
 - 模型、Qdrant 和重排序失败时不生成无依据推荐。
 - SSE 事件顺序稳定，图片 URL 可以访问。
 - 商品 ID、品牌、价格、SKU 和图片与原始 JSON 一致。
+- 子品类价格基准按每商品最低 SKU 计算，奇偶数样本和单样本中位数正确。
+- 性价比价格偏好与明确预算按统一规则合并，且所有下游节点收到同一份生效约束。
+- 缺少子品类或价格基准时直接澄清，不调用 Embedding、Qdrant、重排序或证据模型。
 - Chunk 数量、payload 字段和商品聚合结果可重复构建。
 
 代码合入前运行 pytest、Ruff 和 mypy，并使用本地 Qdrant 与真实模型完成一次端到端验收。
@@ -356,3 +372,4 @@ Unicode 分隔符。用户提供的关联标识不能拆分或伪造额外日志
 | 2026-07-24 | 添加可安全解析的单行意图日志 | 记录最终意图与关联标识，并通过统一 JSON 转义防止用户输入拆分或伪造日志行 |
 | 2026-07-24 | 统一品牌事实并约束意图品牌枚举 | 规范 Apple、Nike 与北面品牌值，将 catalog 品牌注入 JSON Schema，并拒绝模型生成的越界品牌 |
 | 2026-07-24 | 保持意图日志中文可读 | 使用非 ASCII 保留序列化，同时显式转义 Unicode 行分隔符，兼顾终端可读性与单行日志安全 |
+| 2026-07-24 | 增加性价比价格偏好与子品类价格编译 | 将模糊价格语义与证据属性分离，以 Catalog 动态中位数生成统一生效约束，并在信息不足时短路澄清 |

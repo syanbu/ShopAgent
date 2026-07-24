@@ -5,6 +5,7 @@ from shop_agent.models.state import ShoppingState
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.nodes import (
     build_nodes,
+    route_compilation,
     route_intent,
     route_retrieval,
     route_validation,
@@ -16,6 +17,8 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
     builder = StateGraph(ShoppingState)
     builder.add_node("structure_intent", nodes.structure_intent)
     builder.add_node("retrieve_chunks", nodes.retrieve_chunks)
+    builder.add_node("compile_query", nodes.compile_query)
+    builder.add_node("generate_clarification", nodes.generate_clarification)
     builder.add_node("aggregate_products", nodes.aggregate_products)
     builder.add_node("semantic_rerank", nodes.semantic_rerank)
     builder.add_node("validate_evidence", nodes.validate_evidence)
@@ -27,10 +30,19 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         "structure_intent",
         route_intent,
         {
-            "product_search": "retrieve_chunks",
+            "product_search": "compile_query",
             "non_shopping": "generate_response",
         },
     )
+    builder.add_conditional_edges(
+        "compile_query",
+        route_compilation,
+        {
+            "compiled": "retrieve_chunks",
+            "needs_clarification": "generate_clarification",
+        },
+    )
+    builder.add_edge("generate_clarification", END)
     builder.add_conditional_edges(
         "retrieve_chunks",
         route_retrieval,

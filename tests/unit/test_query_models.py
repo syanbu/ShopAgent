@@ -38,3 +38,19 @@ def test_non_shopping_intent_rejects_retrieval_query() -> None:
                 "constraints": {},
             }
         )
+
+
+def test_value_price_preference_is_a_separate_semantic_constraint() -> None:
+    intent = ParsedIntent.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "product_search",
+            "retrieval_query": "手机",
+            "category": "数码电子",
+            "sub_category": "智能手机",
+            "constraints": {"price_preference": "value"},
+        }
+    )
+
+    assert intent.constraints.price_preference == "value"
+    assert intent.constraints.required_features == []

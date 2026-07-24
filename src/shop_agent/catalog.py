@@ -1,7 +1,9 @@
 from pathlib import Path
+from decimal import Decimal, ROUND_HALF_UP
+from statistics import median
 
 from shop_agent.models.product import Product, Sku
-from shop_agent.models.query import SearchConstraints
+from shop_agent.models.query import CategoryPriceReference, SearchConstraints
 
 
 class ProductCatalog:
@@ -14,6 +16,7 @@ class ProductCatalog:
         self._root = root.resolve()
         self._products = products
         self._sources = sources
+        self._price_references = self._build_price_references()
 
     @classmethod
     def load(cls, root: Path) -> "ProductCatalog":
@@ -42,6 +45,11 @@ class ProductCatalog:
     def source_path(self, product_id: str) -> str:
         return self._sources[product_id]
 
+    def price_reference(
+        self, category: str, sub_category: str
+    ) -> CategoryPriceReference | None:
+        return self._price_references.get((category, sub_category))
+
     def image_file(self, product_id: str) -> Path:
         product = self.get(product_id)
         path = (self._root / product.image_path).resolve()
@@ -59,3 +67,29 @@ class ProductCatalog:
             if (constraints.min_price is None or sku.price >= constraints.min_price)
             and (constraints.max_price is None or sku.price <= constraints.max_price)
         ]
+
+    def _build_price_references(
+        self,
+    ) -> dict[tuple[str, str], CategoryPriceReference]:
+        grouped: dict[tuple[str, str], list[Decimal]] = {}
+        for product in self._products.values():
+            key = (product.category, product.sub_category)
+            grouped.setdefault(key, []).append(
+                min(Decimal(str(sku.price)) for sku in product.skus)
+            )
+        references: dict[tuple[str, str], CategoryPriceReference] = {}
+        for (category, sub_category), prices in grouped.items():
+            median_price = Decimal(median(prices)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            cap = (median_price * Decimal("1.2")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            references[(category, sub_category)] = CategoryPriceReference(
+                category=category,
+                sub_category=sub_category,
+                sample_count=len(prices),
+                median_min_sku_price=float(median_price),
+                value_price_cap=float(cap),
+            )
+        return references

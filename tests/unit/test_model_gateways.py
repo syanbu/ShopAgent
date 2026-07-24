@@ -64,6 +64,9 @@ def test_intent_prompt_contains_schema_constraints_and_taxonomy_contract() -> No
         "description"
     ]
     assert "用户表达最高可接受价格时写入 max_price" in prompt
+    assert "性价比高" in prompt
+    assert '"price_preference":"value"' in prompt
+    assert "不得进入 required_features" in prompt
     assert '"max_price":8000' in prompt
     assert '"categories":["数码电子"]' in prompt
     assert '"brands":["Apple 苹果","Nike 耐克"]' in prompt

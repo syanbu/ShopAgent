@@ -123,6 +123,7 @@ def _build_intent_system_prompt(
                     "constraints": {
                         "min_price": None,
                         "max_price": 8000,
+                        "price_preference": None,
                         "include_brands": [],
                         "exclude_brands": [],
                         "required_features": [],
@@ -141,6 +142,7 @@ def _build_intent_system_prompt(
                     "constraints": {
                         "min_price": 6000,
                         "max_price": 8000,
+                        "price_preference": None,
                         "include_brands": [],
                         "exclude_brands": [],
                         "required_features": [],
@@ -159,10 +161,30 @@ def _build_intent_system_prompt(
                     "constraints": {
                         "min_price": None,
                         "max_price": None,
+                        "price_preference": None,
                         "include_brands": ["小米"],
                         "exclude_brands": [],
                         "required_features": [],
                         "excluded_features": ["曲面屏"],
+                    },
+                },
+            },
+            {
+                "input": "推荐性价比高的手机",
+                "output": {
+                    "schema_version": 1,
+                    "intent": "product_search",
+                    "retrieval_query": "手机",
+                    "category": "数码电子",
+                    "sub_category": "智能手机",
+                    "constraints": {
+                        "min_price": None,
+                        "max_price": None,
+                        "price_preference": "value",
+                        "include_brands": [],
+                        "exclude_brands": [],
+                        "required_features": [],
+                        "excluded_features": [],
                     },
                 },
             },
@@ -180,14 +202,17 @@ def _build_intent_system_prompt(
         "边界时才使用 null。\n"
         "3. 用户明确表达的价格、品牌、必需属性和排除属性必须全部进入 "
         "constraints，不得遗漏，也不得根据常识补充未表达的约束。\n"
-        "4. retrieval_query 只保留适合向量检索的商品、场景和正向需求，"
+        "4. 用户明确表达‘性价比高’或语义等价的价格偏好时，将 "
+        "price_preference 设为 value；否则为 null。该表达不得进入 required_features、"
+        "excluded_features 或 retrieval_query，不得自行填写统计价格。\n"
+        "5. retrieval_query 只保留适合向量检索的商品、场景和正向需求，"
         "不重复价格、品牌和排除条件。\n"
-        "5. taxonomy 数组非空时，category、sub_category、include_brands 和"
+        "6. taxonomy 数组非空时，category、sub_category、include_brands 和"
         "exclude_brands 只能使用其中的精确值；category_pairs 非空时必须使用"
         "有效组合。无法匹配类目时使用 null，品牌不得使用别名或自行造词。\n"
-        "6. 参考示例只说明字段语义，不是可识别句式列表。语义等价的表达必须"
+        "7. 参考示例只说明字段语义，不是可识别句式列表。语义等价的表达必须"
         "映射到相同字段。\n"
-        "7. 输出前在内部检查用户明确表达的每项约束是否都已映射，最终仍只输出 "
+        "8. 输出前在内部检查用户明确表达的每项约束是否都已映射，最终仍只输出 "
         "JSON 对象。\n"
         f"输出 JSON Schema：{schema_json}\n"
         f"可用 taxonomy：{taxonomy_json}\n"

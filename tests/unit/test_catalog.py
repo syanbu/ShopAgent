@@ -52,3 +52,51 @@ def test_repository_dataset_contains_100_products() -> None:
     brands = set(catalog.brands())
     assert {"Apple 苹果", "Nike 耐克", "北面"}.issubset(brands)
     assert brands.isdisjoint({"苹果", "Nike", "耐克", "The North Face"})
+
+
+def test_catalog_builds_price_references_from_one_sample_per_product(
+    sample_dataset_root: Path,
+    sample_product: Product,
+) -> None:
+    products = {
+        "p1": sample_product.model_copy(
+            update={
+                "product_id": "p1",
+                "skus": [
+                    sample_product.skus[0].model_copy(update={"price": 100}),
+                    sample_product.skus[1].model_copy(update={"price": 999}),
+                ],
+            }
+        ),
+        "p2": sample_product.model_copy(
+            update={
+                "product_id": "p2",
+                "skus": [sample_product.skus[0].model_copy(update={"price": 200})],
+            }
+        ),
+    }
+    catalog = ProductCatalog(sample_dataset_root, products, {})
+
+    reference = catalog.price_reference("数码电子", "蓝牙耳机")
+
+    assert reference is not None
+    assert reference.sample_count == 2
+    assert reference.median_min_sku_price == 150.0
+    assert reference.value_price_cap == 180.0
+
+
+def test_repository_price_reference_matches_design_baseline() -> None:
+    root = Path("ecommerce_agent_dataset")
+    if not root.exists():
+        pytest.skip("repository dataset is unavailable")
+    catalog = ProductCatalog.load(root)
+
+    smartphone = catalog.price_reference("数码电子", "智能手机")
+    tshirt = catalog.price_reference("服饰运动", "短袖T恤")
+
+    assert smartphone is not None
+    assert (smartphone.sample_count, smartphone.median_min_sku_price) == (10, 7249.0)
+    assert smartphone.value_price_cap == 8698.8
+    assert tshirt is not None
+    assert (tshirt.sample_count, tshirt.median_min_sku_price) == (3, 129.0)
+    assert tshirt.value_price_cap == 154.8

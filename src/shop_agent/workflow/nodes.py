@@ -19,6 +19,7 @@ _UNICODE_LINE_SEPARATOR_ESCAPES = {
     0x2029: "\\u2029",
 }
 IntentRoute = Literal["product_search", "non_shopping"]
+CompilationRoute = Literal["compiled", "needs_clarification"]
 RetrievalRoute = Literal["has_results", "no_results"]
 ValidationRoute = Literal["has_candidates", "no_candidates"]
 SAFETY_RULES = (
@@ -68,8 +69,11 @@ class WorkflowNodes:
         return updates
 
     async def retrieve_chunks(self, state: ShoppingState) -> dict[str, object]:
+        intent = state["parsed_intent"].model_copy(
+            update={"constraints": state["effective_constraints"]}
+        )
         chunks = await self.dependencies.retrieval_service.retrieve_chunks(
-            state["parsed_intent"]
+            intent
         )
         updates: dict[str, object] = {"retrieved_chunks": chunks}
         if not chunks:
@@ -95,7 +99,7 @@ class WorkflowNodes:
         intent = state["parsed_intent"]
         validated = await self.dependencies.evidence_service.validate_candidates(
             state["candidates"],
-            intent.constraints,
+            state["effective_constraints"],
             category=intent.category,
             sub_category=intent.sub_category,
         )
@@ -107,16 +111,51 @@ class WorkflowNodes:
     async def decide_candidates(
         self, state: ShoppingState, writer: StreamWriter
     ) -> dict[str, object]:
-        intent = state["parsed_intent"]
         selected = self.dependencies.evidence_service.select_candidates(
             state["validated_candidates"],
             self.dependencies.settings.final_product_limit,
-            constraints=intent.constraints,
+            constraints=state["effective_constraints"],
         )
         for rank, item in enumerate(selected, start=1):
             event = self._product_event(rank, item)
             writer({"event": "product", "data": event.model_dump(mode="json")})
         return {"selected_products": selected, "response_mode": "shopping"}
+
+    async def compile_query(self, state: ShoppingState) -> dict[str, object]:
+        from shop_agent.services.query_compiler import compile_query
+
+        result = compile_query(state["parsed_intent"], self.dependencies.catalog)
+        updates: dict[str, object] = {
+            "effective_constraints": result.effective_constraints,
+        }
+        if result.price_reference is not None:
+            updates["price_reference"] = result.price_reference
+        if result.needs_clarification:
+            updates["response_mode"] = "clarification"
+            updates["clarification_message"] = result.clarification_message
+        logger.info(
+            "compiled_query %s",
+            _single_line_json(
+                {
+                    "request_id": state.get("request_id"),
+                    "original_constraints": state["parsed_intent"].constraints.model_dump(mode="json"),
+                    "effective_constraints": result.effective_constraints.model_dump(mode="json"),
+                    "price_reference": result.price_reference.model_dump(mode="json")
+                    if result.price_reference is not None
+                    else None,
+                    "needs_clarification": result.needs_clarification,
+                }
+            ),
+        )
+        return updates
+
+    async def generate_clarification(
+        self, state: ShoppingState, writer: StreamWriter
+    ) -> dict[str, str]:
+        message = state["clarification_message"]
+        data = TextDeltaData(delta=message)
+        writer({"event": "text_delta", "data": data.model_dump(mode="json")})
+        return {"response_text": message}
 
     async def generate_response(
         self, state: ShoppingState, writer: StreamWriter
@@ -165,6 +204,14 @@ def build_nodes(dependencies: WorkflowDependencies) -> WorkflowNodes:
 
 def route_intent(state: ShoppingState) -> IntentRoute:
     return state["parsed_intent"].intent
+
+
+def route_compilation(state: ShoppingState) -> CompilationRoute:
+    return (
+        "needs_clarification"
+        if state.get("response_mode") == "clarification"
+        else "compiled"
+    )
 
 
 def route_retrieval(state: ShoppingState) -> RetrievalRoute:

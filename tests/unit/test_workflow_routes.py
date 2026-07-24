@@ -20,6 +20,42 @@ async def _drain(graph: Any, message: str) -> list[dict[str, Any]]:
     ]
 
 
+@pytest.mark.asyncio
+async def test_value_price_is_compiled_once_and_shared_by_downstream_nodes(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+
+    await _drain(_graph(harness), "推荐性价比高的蓝牙耳机")
+
+    expected_cap = 481.2
+    assert harness.retrieval.retrieve_calls[0].constraints.max_price == expected_cap
+    assert harness.evidence.validate_calls[0][1].max_price == expected_cap
+    assert harness.evidence.select_calls[0][2].max_price == expected_cap
+
+
+@pytest.mark.asyncio
+async def test_value_price_without_sub_category_short_circuits_to_clarification(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    original_parse = harness.parser.parse
+
+    async def parse_without_sub_category(message: str):
+        parsed = await original_parse(message)
+        return parsed.model_copy(update={"sub_category": None})
+
+    harness.parser.parse = parse_without_sub_category  # type: ignore[method-assign]
+
+    events = await _drain(_graph(harness), "推荐性价比高的商品")
+
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.evidence.validate_calls == []
+    assert harness.response.prompts == []
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == "请明确想购买的商品类型，例如手机、T恤或耳机。"
+
+
 def _graph(harness: Any) -> Any:
     return build_graph(_dependencies(harness))
 
