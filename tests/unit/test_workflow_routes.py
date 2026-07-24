@@ -1,3 +1,5 @@
+import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -5,6 +7,7 @@ import pytest
 
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
+from shop_agent.workflow.nodes import build_nodes
 from tests.unit.workflow_fakes import build_harness, initial_state
 
 
@@ -18,16 +21,82 @@ async def _drain(graph: Any, message: str) -> list[dict[str, Any]]:
 
 
 def _graph(harness: Any) -> Any:
-    return build_graph(
-        WorkflowDependencies(
-            intent_parser=harness.parser,
-            retrieval_service=harness.retrieval,
-            evidence_service=harness.evidence,
-            response_generator=harness.response,
-            catalog=harness.catalog,
-            settings=harness.settings,
-        )
+    return build_graph(_dependencies(harness))
+
+
+def _dependencies(harness: Any) -> WorkflowDependencies:
+    return WorkflowDependencies(
+        intent_parser=harness.parser,
+        retrieval_service=harness.retrieval,
+        evidence_service=harness.evidence,
+        response_generator=harness.response,
+        catalog=harness.catalog,
+        settings=harness.settings,
     )
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_intent"),
+    [
+        ("推荐蓝牙耳机", "product_search"),
+        ("你好", "non_shopping"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_structure_intent_logs_final_json_for_every_intent(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    message: str,
+    expected_intent: str,
+) -> None:
+    harness = build_harness(tmp_path)
+    nodes = build_nodes(_dependencies(harness))
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        await nodes.structure_intent(initial_state(message))
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "uvicorn.error"
+        and record.getMessage().startswith("parsed_intent ")
+    ]
+    assert len(records) == 1
+    log_message = records[0].getMessage()
+    payload = json.loads(log_message.removeprefix("parsed_intent "))
+    assert payload["request_id"] == "request-fixed"
+    assert payload["conversation_id"] == "conversation-fixed"
+    assert payload["intent"]["intent"] == expected_intent
+    if expected_intent == "product_search":
+        assert payload["intent"]["constraints"]["max_price"] == 500
+
+
+@pytest.mark.asyncio
+async def test_structure_intent_escapes_log_line_separators(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = build_harness(tmp_path)
+    nodes = build_nodes(_dependencies(harness))
+    conversation_id = "ok\nINFO forged=true\u2028next"
+    state = initial_state("你好")
+    state["conversation_id"] = conversation_id
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        await nodes.structure_intent(state)
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "uvicorn.error"
+        and record.getMessage().startswith("parsed_intent ")
+    ]
+    assert len(records) == 1
+    log_message = records[0].getMessage()
+    assert "\n" not in log_message
+    assert "\u2028" not in log_message
+    payload = json.loads(log_message.removeprefix("parsed_intent "))
+    assert payload["conversation_id"] == conversation_id
 
 
 @pytest.mark.asyncio

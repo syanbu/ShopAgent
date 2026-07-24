@@ -1,4 +1,5 @@
 import json
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
@@ -11,6 +12,7 @@ from shop_agent.models.state import ShoppingState
 from shop_agent.workflow.dependencies import WorkflowDependencies
 
 
+logger = logging.getLogger("uvicorn.error")
 IntentRoute = Literal["product_search", "non_shopping"]
 RetrievalRoute = Literal["has_results", "no_results"]
 ValidationRoute = Literal["has_candidates", "no_candidates"]
@@ -32,10 +34,27 @@ class WorkflowNodes:
             if parsed.intent == "product_search"
             else "non_shopping",
         }
-        if "request_id" not in state:
-            updates["request_id"] = self.dependencies.id_factory()
-        if "conversation_id" not in state:
-            updates["conversation_id"] = self.dependencies.id_factory()
+        request_id = state.get("request_id")
+        if request_id is None:
+            request_id = self.dependencies.id_factory()
+            updates["request_id"] = request_id
+        conversation_id = state.get("conversation_id")
+        if conversation_id is None:
+            conversation_id = self.dependencies.id_factory()
+            updates["conversation_id"] = conversation_id
+        log_payload = {
+            "request_id": request_id,
+            "conversation_id": conversation_id,
+            "intent": parsed.model_dump(mode="json"),
+        }
+        logger.info(
+            "parsed_intent %s",
+            json.dumps(
+                log_payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        )
         return updates
 
     async def retrieve_chunks(self, state: ShoppingState) -> dict[str, object]:

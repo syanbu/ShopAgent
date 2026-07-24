@@ -10,12 +10,13 @@ from shop_agent.catalog import ProductCatalog
 from shop_agent.cli.index_products import index_catalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
-from shop_agent.models.query import SearchConstraints
+from shop_agent.models.query import ParsedIntent, SearchConstraints
 from shop_agent.models.retrieval import EvidenceChunk
 from shop_agent.services.dashscope_chat import (
     DashScopeEvidenceMapper,
     DashScopeIntentParser,
     DashScopeResponseGenerator,
+    _build_intent_system_prompt,
 )
 from shop_agent.services.dashscope_embedding import DashScopeEmbedder
 from shop_agent.services.dashscope_rerank import DashScopeReranker
@@ -47,6 +48,23 @@ def _chat_response(content: str) -> SimpleNamespace:
         ],
         usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
     )
+
+
+def test_intent_prompt_contains_schema_constraints_and_taxonomy_contract() -> None:
+    schema = ParsedIntent.model_json_schema()
+    prompt = _build_intent_system_prompt(
+        categories=["数码电子"],
+        sub_categories=["智能手机"],
+        category_pairs=[("数码电子", "智能手机")],
+    )
+
+    assert schema["properties"]["retrieval_query"]["description"]
+    assert schema["$defs"]["SearchConstraints"]["properties"]["max_price"][
+        "description"
+    ]
+    assert "用户表达最高可接受价格时写入 max_price" in prompt
+    assert '"max_price":8000' in prompt
+    assert '"categories":["数码电子"]' in prompt
 
 
 @pytest.mark.asyncio
@@ -210,7 +228,7 @@ async def test_intent_parser_drops_mismatched_catalog_taxonomy_pair(
     assert result.sub_category is None
     assert create.await_args is not None
     prompt = create.await_args.kwargs["messages"][0]["content"]
-    assert '["服饰运动", "跑步鞋"]' in prompt
+    assert '["服饰运动","跑步鞋"]' in prompt
 
 
 @pytest.mark.asyncio
