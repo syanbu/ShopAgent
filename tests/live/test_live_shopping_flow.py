@@ -142,6 +142,11 @@ async def test_live_single_turn_shopping_flow() -> None:
                 settings,
                 categories=[product.category for product in catalog.all()],
                 sub_categories=[product.sub_category for product in catalog.all()],
+                category_pairs=[
+                    (product.category, product.sub_category)
+                    for product in catalog.all()
+                ],
+                brands=catalog.brands(),
             ),
             retrieval_service=retrieval,
             evidence_service=evidence,

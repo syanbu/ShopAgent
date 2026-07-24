@@ -72,13 +72,35 @@ async def test_structure_intent_logs_final_json_for_every_intent(
 
 
 @pytest.mark.asyncio
+async def test_structure_intent_keeps_chinese_readable_in_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = build_harness(tmp_path)
+    nodes = build_nodes(_dependencies(harness))
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        await nodes.structure_intent(initial_state("推荐蓝牙耳机"))
+
+    log_message = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "uvicorn.error"
+        and record.getMessage().startswith("parsed_intent ")
+    )
+    assert '"retrieval_query":"推荐蓝牙耳机"' in log_message
+    assert '"category":"数码电子"' in log_message
+    assert "\\u63a8" not in log_message
+
+
+@pytest.mark.asyncio
 async def test_structure_intent_escapes_log_line_separators(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     harness = build_harness(tmp_path)
     nodes = build_nodes(_dependencies(harness))
-    conversation_id = "ok\nINFO forged=true\u2028next"
+    conversation_id = "ok\nINFO forged=true\u0085next\u2028next\u2029next"
     state = initial_state("你好")
     state["conversation_id"] = conversation_id
 
@@ -94,7 +116,9 @@ async def test_structure_intent_escapes_log_line_separators(
     assert len(records) == 1
     log_message = records[0].getMessage()
     assert "\n" not in log_message
+    assert "\u0085" not in log_message
     assert "\u2028" not in log_message
+    assert "\u2029" not in log_message
     payload = json.loads(log_message.removeprefix("parsed_intent "))
     assert payload["conversation_id"] == conversation_id
 

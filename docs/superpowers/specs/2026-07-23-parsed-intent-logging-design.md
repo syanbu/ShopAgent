@@ -23,9 +23,10 @@
 parsed_intent {"request_id":"<request_id>","conversation_id":"<conversation_id>","intent":<JSON>}
 ```
 
-载荷使用 `json.dumps(..., ensure_ascii=True, separators=(",", ":"))`
-序列化。换行、引号、反斜杠、控制字符和 Unicode 行分隔符都会转义，因此每条记录
-只占一个物理日志行。解析 JSON 后仍能得到原始中文和值。`intent` 与
+载荷使用 `json.dumps(..., ensure_ascii=False, separators=(",", ":"))`
+序列化，使中文在终端中保持可读。JSON 编码负责转义换行、引号、反斜杠和控制字符，
+随后显式将 `U+0085`、`U+2028`、`U+2029` 替换为对应的 `\uXXXX` 序列，因此
+每条记录只占一个物理日志行。解析 JSON 后仍能得到原始字符和值。`intent` 与
 `ParsedIntent` 对象一致，包括 `schema_version`、意图类型、
 `retrieval_query`、类目字段和完整 `constraints`。
 
@@ -37,5 +38,7 @@ parsed_intent {"request_id":"<request_id>","conversation_id":"<conversation_id>"
 - 商品搜索请求记录一次最终意图 JSON，并包含价格等结构化约束。
 - 非购物请求同样记录一次最终意图 JSON。
 - 日志包含本次请求的 `request_id` 和 `conversation_id`。
-- 包含换行符的 `conversation_id` 不会产生额外日志行，JSON 解析后仍保持原值。
+- 中文意图字段直接显示中文，不转换为 ASCII Unicode 转义。
+- 包含换行符或 Unicode 行分隔符的 `conversation_id` 不会产生额外日志行，
+  JSON 解析后仍保持原值。
 - 现有工作流路由和 SSE 测试继续通过。

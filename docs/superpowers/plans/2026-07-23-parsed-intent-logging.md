@@ -4,7 +4,7 @@
 
 **Goal:** Log the final validated `ParsedIntent` JSON object for every successfully classified request without allowing user-controlled values to split or forge log lines.
 
-**Architecture:** Add one structured, single-line `INFO` log at the `structure_intent` workflow boundary, after parsing and taxonomy normalization. Serialize the complete payload with `json.dumps(..., ensure_ascii=True)` before emitting it through Uvicorn's server logger, so correlation IDs and free-form intent fields cannot inject physical log lines.
+**Architecture:** Add one structured, single-line `INFO` log at the `structure_intent` workflow boundary, after parsing and taxonomy normalization. Serialize the complete payload with `json.dumps(..., ensure_ascii=False)` for readable Chinese, then explicitly escape Unicode line separators before emitting it through Uvicorn's server logger, so correlation IDs and free-form intent fields cannot inject physical log lines.
 
 **Tech Stack:** Python 3.11+, standard-library `logging` and `json`, Pydantic v2, LangGraph, pytest `caplog`.
 
@@ -203,6 +203,22 @@ Expected: FAIL because the current `%s` formatting writes the newline directly.
 Replace the positional log fields with:
 
 ```python
+_UNICODE_LINE_SEPARATOR_ESCAPES = {
+    0x0085: "\\u0085",
+    0x2028: "\\u2028",
+    0x2029: "\\u2029",
+}
+
+
+def _single_line_json(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return encoded.translate(_UNICODE_LINE_SEPARATOR_ESCAPES)
+
+
 log_payload = {
     "request_id": request_id,
     "conversation_id": conversation_id,
@@ -210,11 +226,7 @@ log_payload = {
 }
 logger.info(
     "parsed_intent %s",
-    json.dumps(
-        log_payload,
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ),
+    _single_line_json(log_payload),
 )
 ```
 

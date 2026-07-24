@@ -56,6 +56,11 @@ uv run python -m shop_agent.cli.index_products
 
 Point ID 根据 `chunk_id` 稳定生成，重复执行会覆盖同一 Chunk。第一阶段假设完成索引后本地商品 JSON 不会删除或重排证据内容，索引器不负责清理陈旧 Point。
 
+商品 JSON 中的品牌、类目、价格或参与 Chunk 文本的字段发生变化后，必须重新运行
+全量索引，使 Qdrant 向量和 payload 与 catalog 保持一致。若商品或 Chunk 已被删除，
+应先删除 `product_text_chunks_v1` 集合再完整重建；健康接口只检查集合和向量配置，
+不能识别旧 payload 与当前 JSON 的语义漂移。
+
 ## 启动 Agent API
 
 ```bash

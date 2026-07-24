@@ -25,8 +25,30 @@ def test_catalog_selects_only_skus_inside_budget(
     assert [sku.sku_id for sku in skus] == ["sku-low"]
 
 
+def test_catalog_exposes_sorted_unique_brands(
+    sample_dataset_root: Path,
+    sample_product: Product,
+) -> None:
+    products = [
+        sample_product.model_copy(update={"product_id": "p3", "brand": "小米"}),
+        sample_product.model_copy(update={"product_id": "p1", "brand": "Apple 苹果"}),
+        sample_product.model_copy(update={"product_id": "p2", "brand": "小米"}),
+    ]
+    catalog = ProductCatalog(
+        sample_dataset_root,
+        {product.product_id: product for product in products},
+        {},
+    )
+
+    assert catalog.brands() == ["Apple 苹果", "小米"]
+
+
 def test_repository_dataset_contains_100_products() -> None:
     root = Path("ecommerce_agent_dataset")
     if not root.exists():
         pytest.skip("repository dataset is unavailable")
-    assert len(ProductCatalog.load(root).all()) == 100
+    catalog = ProductCatalog.load(root)
+    assert len(catalog.all()) == 100
+    brands = set(catalog.brands())
+    assert {"Apple 苹果", "Nike 耐克", "北面"}.issubset(brands)
+    assert brands.isdisjoint({"苹果", "Nike", "耐克", "The North Face"})

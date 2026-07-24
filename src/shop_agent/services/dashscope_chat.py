@@ -60,7 +60,7 @@ class _DashScopeChatGateway:
 
             try:
                 return validator(content)
-            except ValidationError as exc:
+            except (ValidationError, ValueError) as exc:
                 if attempt == 1:
                     raise ServiceError(
                         error_code,
@@ -88,9 +88,15 @@ def _build_intent_system_prompt(
     categories: Sequence[str],
     sub_categories: Sequence[str],
     category_pairs: Sequence[tuple[str, str]],
+    brands: Sequence[str] = (),
 ) -> str:
+    schema = ParsedIntent.model_json_schema()
+    if brands:
+        constraint_properties = schema["$defs"]["SearchConstraints"]["properties"]
+        for field_name in ("include_brands", "exclude_brands"):
+            constraint_properties[field_name]["items"]["enum"] = list(brands)
     schema_json = json.dumps(
-        ParsedIntent.model_json_schema(),
+        schema,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -99,6 +105,7 @@ def _build_intent_system_prompt(
             "categories": list(categories),
             "sub_categories": list(sub_categories),
             "category_pairs": [list(pair) for pair in category_pairs],
+            "brands": list(brands),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -175,8 +182,9 @@ def _build_intent_system_prompt(
         "constraints，不得遗漏，也不得根据常识补充未表达的约束。\n"
         "4. retrieval_query 只保留适合向量检索的商品、场景和正向需求，"
         "不重复价格、品牌和排除条件。\n"
-        "5. taxonomy 数组非空时，category 和 sub_category 只能使用其中的"
-        "精确值；category_pairs 非空时必须使用有效组合。无法匹配时使用 null。\n"
+        "5. taxonomy 数组非空时，category、sub_category、include_brands 和"
+        "exclude_brands 只能使用其中的精确值；category_pairs 非空时必须使用"
+        "有效组合。无法匹配类目时使用 null，品牌不得使用别名或自行造词。\n"
         "6. 参考示例只说明字段语义，不是可识别句式列表。语义等价的表达必须"
         "映射到相同字段。\n"
         "7. 输出前在内部检查用户明确表达的每项约束是否都已映射，最终仍只输出 "
@@ -195,16 +203,35 @@ class DashScopeIntentParser(_DashScopeChatGateway):
         categories: Sequence[str] = (),
         sub_categories: Sequence[str] = (),
         category_pairs: Sequence[tuple[str, str]] = (),
+        brands: Sequence[str] = (),
     ) -> None:
         super().__init__(settings)
         self._categories = tuple(sorted(set(categories)))
         self._sub_categories = tuple(sorted(set(sub_categories)))
         self._category_pairs = tuple(sorted(set(category_pairs)))
+        self._brands = tuple(sorted(set(brands)))
         self._system_prompt = _build_intent_system_prompt(
             categories=self._categories,
             sub_categories=self._sub_categories,
             category_pairs=self._category_pairs,
+            brands=self._brands,
         )
+
+    def _validate_intent(self, content: str) -> ParsedIntent:
+        parsed = ParsedIntent.model_validate_json(content)
+        if not self._brands:
+            return parsed
+        submitted_brands = {
+            *parsed.constraints.include_brands,
+            *parsed.constraints.exclude_brands,
+        }
+        unknown_brands = sorted(submitted_brands.difference(self._brands))
+        if unknown_brands:
+            raise ValueError(
+                f"brand values {unknown_brands} must be exact catalog values "
+                f"from {list(self._brands)}"
+            )
+        return parsed
 
     async def parse(self, message: str) -> ParsedIntent:
         messages: list[ChatCompletionMessageParam] = [
@@ -213,7 +240,7 @@ class DashScopeIntentParser(_DashScopeChatGateway):
         ]
         parsed = await self._structured_call(
             messages,
-            ParsedIntent.model_validate_json,
+            self._validate_intent,
             "INTENT_PARSE_FAILED",
         )
         if parsed.intent == "non_shopping":

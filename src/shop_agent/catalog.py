@@ -36,6 +36,9 @@ class ProductCatalog:
     def all(self) -> list[Product]:
         return list(self._products.values())
 
+    def brands(self) -> list[str]:
+        return sorted({product.brand for product in self._products.values()})
+
     def source_path(self, product_id: str) -> str:
         return self._sources[product_id]
 

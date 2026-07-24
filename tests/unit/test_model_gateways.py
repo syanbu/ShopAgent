@@ -56,6 +56,7 @@ def test_intent_prompt_contains_schema_constraints_and_taxonomy_contract() -> No
         categories=["数码电子"],
         sub_categories=["智能手机"],
         category_pairs=[("数码电子", "智能手机")],
+        brands=["Apple 苹果", "Nike 耐克"],
     )
 
     assert schema["properties"]["retrieval_query"]["description"]
@@ -65,6 +66,90 @@ def test_intent_prompt_contains_schema_constraints_and_taxonomy_contract() -> No
     assert "用户表达最高可接受价格时写入 max_price" in prompt
     assert '"max_price":8000' in prompt
     assert '"categories":["数码电子"]' in prompt
+    assert '"brands":["Apple 苹果","Nike 耐克"]' in prompt
+    assert prompt.count('"enum":["Apple 苹果","Nike 耐克"]') == 2
+
+
+@pytest.mark.asyncio
+async def test_intent_parser_retries_noncanonical_brand_with_catalog_values(
+    settings: Settings,
+) -> None:
+    def response(brand: str) -> SimpleNamespace:
+        return _chat_response(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "intent": "product_search",
+                    "retrieval_query": "手机",
+                    "category": "数码电子",
+                    "sub_category": "智能手机",
+                    "constraints": {
+                        "exclude_brands": [brand],
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    create = AsyncMock(
+        side_effect=[
+            response("苹果"),
+            response("Apple 苹果"),
+        ]
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        result = await DashScopeIntentParser(
+            settings,
+            categories=["数码电子"],
+            sub_categories=["智能手机"],
+            category_pairs=[("数码电子", "智能手机")],
+            brands=["Apple 苹果"],
+        ).parse("推荐手机，不要苹果")
+
+    assert result.constraints.exclude_brands == ["Apple 苹果"]
+    assert create.await_count == 2
+    correction = create.await_args_list[1].kwargs["messages"][-1]["content"]
+    assert "苹果" in correction
+    assert "Apple 苹果" in correction
+
+
+@pytest.mark.asyncio
+async def test_intent_parser_rejects_brand_outside_catalog_after_retry(
+    settings: Settings,
+) -> None:
+    response = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "product_search",
+                "retrieval_query": "手机",
+                "category": "数码电子",
+                "sub_category": "智能手机",
+                "constraints": {
+                    "include_brands": ["虚构品牌"],
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(side_effect=[response, response])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        with pytest.raises(ServiceError) as error:
+            await DashScopeIntentParser(
+                settings,
+                brands=["Apple 苹果"],
+            ).parse("推荐虚构品牌手机")
+
+    assert error.value.code == "INTENT_PARSE_FAILED"
+    assert create.await_count == 2
 
 
 @pytest.mark.asyncio

@@ -81,6 +81,7 @@ def build_api_dependencies(settings: Settings | None = None) -> ApiDependencies:
                     (product.category, product.sub_category)
                     for product in catalog.all()
                 ],
+                brands=catalog.brands(),
             ),
             retrieval_service=retrieval,
             evidence_service=evidence,

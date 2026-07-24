@@ -13,6 +13,11 @@ from shop_agent.workflow.dependencies import WorkflowDependencies
 
 
 logger = logging.getLogger("uvicorn.error")
+_UNICODE_LINE_SEPARATOR_ESCAPES = {
+    0x0085: "\\u0085",
+    0x2028: "\\u2028",
+    0x2029: "\\u2029",
+}
 IntentRoute = Literal["product_search", "non_shopping"]
 RetrievalRoute = Literal["has_results", "no_results"]
 ValidationRoute = Literal["has_candidates", "no_candidates"]
@@ -20,6 +25,15 @@ SAFETY_RULES = (
     "不得声称库存、优惠、优惠券或购买链接；不得补充已校验事实之外的功能、"
     "属性、价格、SKU 或其他事实。"
 )
+
+
+def _single_line_json(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return encoded.translate(_UNICODE_LINE_SEPARATOR_ESCAPES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,11 +63,7 @@ class WorkflowNodes:
         }
         logger.info(
             "parsed_intent %s",
-            json.dumps(
-                log_payload,
-                ensure_ascii=True,
-                separators=(",", ":"),
-            ),
+            _single_line_json(log_payload),
         )
         return updates
 
