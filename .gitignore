@@ -9,3 +9,4 @@ __pycache__/
 coverage.xml
 htmlcov/
 qdrant_storage/
+.superpowers/

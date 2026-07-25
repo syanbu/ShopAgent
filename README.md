@@ -70,6 +70,9 @@ env -u ALL_PROXY -u all_proxy \
   --port 8000 \
   --reload
 ```
+```powershell
+uv run uvicorn shop_agent.api.app:app --host 127.0.0.1 --port 8000 --reload
+```
 
 `env -u ALL_PROXY -u all_proxy` 只对本次命令临时忽略代理，避免本机 Qdrant 和 API 请求被转发到代理服务器。
 
