@@ -1,9 +1,31 @@
-from pathlib import Path
+from copy import deepcopy
 from decimal import Decimal, ROUND_HALF_UP
+from operator import eq, ge, gt, le, lt
+from pathlib import Path
 from statistics import median
+from typing import cast
 
 from shop_agent.models.product import Product, Sku
-from shop_agent.models.query import CategoryPriceReference, SearchConstraints
+from shop_agent.models.query import (
+    CanonicalSkuKey,
+    CategoryPriceReference,
+    NumericConstraint,
+    SearchConstraints,
+)
+from shop_agent.sku_attributes import (
+    build_sku_taxonomy,
+    normalize_sku_properties,
+    parse_quantity,
+)
+
+
+_NUMERIC_OPERATORS = {
+    "==": eq,
+    ">": gt,
+    ">=": ge,
+    "<": lt,
+    "<=": le,
+}
 
 
 class ProductCatalog:
@@ -17,6 +39,7 @@ class ProductCatalog:
         self._products = products
         self._sources = sources
         self._price_references = self._build_price_references()
+        self._sku_taxonomy = build_sku_taxonomy(products.values())
 
     @classmethod
     def load(cls, root: Path) -> "ProductCatalog":
@@ -45,6 +68,11 @@ class ProductCatalog:
     def source_path(self, product_id: str) -> str:
         return self._sources[product_id]
 
+    def sku_taxonomy(
+        self,
+    ) -> dict[str, dict[CanonicalSkuKey, list[str]]]:
+        return deepcopy(self._sku_taxonomy)
+
     def price_reference(
         self, category: str, sub_category: str
     ) -> CategoryPriceReference | None:
@@ -60,13 +88,62 @@ class ProductCatalog:
     def matched_skus(
         self, product_id: str, constraints: SearchConstraints
     ) -> list[Sku]:
-        skus = self.get(product_id).skus
+        product = self.get(product_id)
+        structured_numeric_fields = self._structured_numeric_fields(product_id)
         return [
             sku
-            for sku in skus
-            if (constraints.min_price is None or sku.price >= constraints.min_price)
-            and (constraints.max_price is None or sku.price <= constraints.max_price)
+            for sku in product.skus
+            if self._sku_matches(
+                product,
+                sku,
+                constraints,
+                structured_numeric_fields,
+            )
         ]
+
+    def unresolved_numeric_constraints(
+        self,
+        product_id: str,
+        constraints: SearchConstraints,
+    ) -> list[NumericConstraint]:
+        fields = self._structured_numeric_fields(product_id)
+        return [
+            item
+            for item in constraints.numeric_constraints
+            if item.field not in fields
+        ]
+
+    def _structured_numeric_fields(self, product_id: str) -> set[str]:
+        product = self.get(product_id)
+        fields: set[str] = set()
+        for sku in product.skus:
+            for key, value in normalize_sku_properties(product, sku).items():
+                if parse_quantity(value) is not None:
+                    fields.add(key)
+        return fields
+
+    @staticmethod
+    def _sku_matches(
+        product: Product,
+        sku: Sku,
+        constraints: SearchConstraints,
+        structured_numeric_fields: set[str],
+    ) -> bool:
+        if constraints.min_price is not None and sku.price < constraints.min_price:
+            return False
+        if constraints.max_price is not None and sku.price > constraints.max_price:
+            return False
+        properties = normalize_sku_properties(product, sku)
+        for key, allowed_values in constraints.sku_constraints.items():
+            if properties.get(key) not in allowed_values:
+                return False
+        for item in constraints.numeric_constraints:
+            if item.field not in structured_numeric_fields:
+                continue
+            raw_value = properties.get(cast(CanonicalSkuKey, item.field))
+            if raw_value is None or not _numeric_matches(raw_value, item):
+                return False
+        return True
 
     def _build_price_references(
         self,
@@ -93,3 +170,11 @@ class ProductCatalog:
                 value_price_cap=float(cap),
             )
         return references
+
+
+def _numeric_matches(raw_value: str, constraint: NumericConstraint) -> bool:
+    actual = parse_quantity(raw_value)
+    expected = parse_quantity(f"{constraint.value:g}{constraint.unit}")
+    if actual is None or expected is None or actual[1] != expected[1]:
+        return False
+    return _NUMERIC_OPERATORS[constraint.operator](actual[0], expected[0])

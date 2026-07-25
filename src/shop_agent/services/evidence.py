@@ -3,7 +3,11 @@ from collections.abc import Sequence
 
 from shop_agent.catalog import ProductCatalog
 from shop_agent.errors import ServiceError
-from shop_agent.models.query import SearchConstraints
+from shop_agent.models.query import (
+    EvidenceCondition,
+    SearchConstraints,
+    build_evidence_conditions,
+)
 from shop_agent.models.retrieval import (
     EvidenceAssessment,
     ProductCandidate,
@@ -16,19 +20,8 @@ from shop_agent.services.ports import EvidenceMapper
 logger = logging.getLogger(__name__)
 
 
-def semantic_checks_pass(
-    assessment: EvidenceAssessment, constraints: SearchConstraints
-) -> bool:
-    checks = {check.condition: check for check in assessment.checks}
-    for feature in constraints.required_features:
-        check = checks.get(feature)
-        if check is None or check.status != "supported":
-            return False
-    for feature in constraints.excluded_features:
-        check = checks.get(feature)
-        if check is None or check.status != "supported":
-            return False
-    return True
+def semantic_conditions_allow_candidate(assessment: EvidenceAssessment) -> bool:
+    return all(check.status != "contradicted" for check in assessment.checks)
 
 
 class EvidenceService:
@@ -45,9 +38,6 @@ class EvidenceService:
         sub_category: str | None = None,
     ) -> list[ValidatedCandidate]:
         validated: list[ValidatedCandidate] = []
-        has_semantic_constraints = bool(
-            constraints.required_features or constraints.excluded_features
-        )
         for candidate in candidates:
             product = self._catalog.get(candidate.product.product_id)
             rejection_reasons = self._structured_rejections(
@@ -60,16 +50,24 @@ class EvidenceService:
                 sub_category=sub_category,
             )
             assessment = EvidenceAssessment(product_id=product.product_id)
-            if has_semantic_constraints and not rejection_reasons:
+            unresolved_numeric = self._catalog.unresolved_numeric_constraints(
+                product.product_id,
+                constraints,
+            )
+            evidence_constraints = constraints.model_copy(
+                update={"numeric_constraints": unresolved_numeric}
+            )
+            conditions = build_evidence_conditions(evidence_constraints)
+            if conditions and not rejection_reasons:
                 assessment = await self._mapper.map_conditions(
                     product.product_id,
-                    constraints,
+                    conditions,
                     candidate.evidence,
                 )
-                self._validate_assessment(candidate, assessment)
+                self._validate_assessment(candidate, assessment, conditions)
                 self._log_conflicts(candidate, assessment)
-                if not semantic_checks_pass(assessment, constraints):
-                    rejection_reasons.append("semantic_conditions_not_satisfied")
+                if not semantic_conditions_allow_candidate(assessment):
+                    rejection_reasons.append("semantic_condition_contradicted")
 
             validated.append(
                 ValidatedCandidate(
@@ -110,9 +108,12 @@ class EvidenceService:
         selected: list[SelectedProduct] = []
         for item, score in scored[: max(limit, 0)]:
             product_id = item.candidate.product.product_id
-            evidence_ids = self._decisive_evidence_ids(item.assessment, constraints)
+            evidence_ids = self._decisive_evidence_ids(item.assessment)
             decision_reasons = ["structured_constraints_passed"]
-            if constraints.required_features or constraints.excluded_features:
+            statuses = {check.status for check in item.assessment.checks}
+            if "unknown" in statuses:
+                decision_reasons.append("semantic_conditions_unknown")
+            elif statuses:
                 decision_reasons.append("semantic_conditions_supported")
             decision_reasons.append("rerank_selected")
             selected.append(
@@ -153,12 +154,14 @@ class EvidenceService:
         if product_brand in constraints.exclude_brands:
             reasons.append("brand_excluded")
         if not self._catalog.matched_skus(product_id, constraints):
-            reasons.append("price_out_of_range")
+            reasons.append("no_matching_sku")
         return reasons
 
     @staticmethod
     def _validate_assessment(
-        candidate: ProductCandidate, assessment: EvidenceAssessment
+        candidate: ProductCandidate,
+        assessment: EvidenceAssessment,
+        conditions: Sequence[EvidenceCondition],
     ) -> None:
         if assessment.product_id != candidate.product.product_id:
             raise ServiceError(
@@ -166,11 +169,21 @@ class EvidenceService:
                 "evidence product ID mismatch",
                 retryable=False,
             )
-        conditions = [check.condition for check in assessment.checks]
-        if len(conditions) != len(set(conditions)):
+        returned_condition_ids = [check.condition for check in assessment.checks]
+        if len(returned_condition_ids) != len(set(returned_condition_ids)):
             raise ServiceError(
                 "EVIDENCE_PARSE_FAILED",
                 "duplicate evidence condition",
+                retryable=False,
+            )
+        expected_conditions = {
+            condition.condition_id for condition in conditions
+        }
+        returned_conditions = {check.condition for check in assessment.checks}
+        if returned_conditions != expected_conditions:
+            raise ServiceError(
+                "EVIDENCE_PARSE_FAILED",
+                "evidence conditions do not match request",
                 retryable=False,
             )
         known_ids = {chunk.chunk_id for chunk in candidate.evidence}
@@ -209,15 +222,11 @@ class EvidenceService:
 
     @staticmethod
     def _decisive_evidence_ids(
-        assessment: EvidenceAssessment, constraints: SearchConstraints
+        assessment: EvidenceAssessment,
     ) -> list[str]:
-        conditions = {
-            *constraints.required_features,
-            *constraints.excluded_features,
-        }
         selected: list[str] = []
         for check in assessment.checks:
-            if check.condition not in conditions or check.status != "supported":
+            if check.status != "supported":
                 continue
             for evidence_id in check.evidence_ids:
                 if evidence_id not in selected:

@@ -9,7 +9,11 @@ from pydantic import ValidationError
 from shop_agent.catalog import ProductCatalog
 from shop_agent.errors import ServiceError
 from shop_agent.models.product import Product
-from shop_agent.models.query import SearchConstraints
+from shop_agent.models.query import (
+    EvidenceCondition,
+    NumericConstraint,
+    SearchConstraints,
+)
 from shop_agent.models.retrieval import (
     ChunkType,
     EvidenceAssessment,
@@ -25,8 +29,17 @@ from shop_agent.services.evidence import EvidenceService
 def test_supported_evidence_check_requires_decisive_evidence() -> None:
     with pytest.raises(ValidationError, match="supported check requires evidence"):
         EvidenceCheck(
-            condition="防水",
+            condition="required:防水",
             status="supported",
+            evidence_ids=[],
+        )
+
+
+def test_contradicted_evidence_check_requires_decisive_evidence() -> None:
+    with pytest.raises(ValidationError, match="contradicted check requires evidence"):
+        EvidenceCheck(
+            condition="required:防水",
+            status="contradicted",
             evidence_ids=[],
         )
 
@@ -34,15 +47,15 @@ def test_supported_evidence_check_requires_decisive_evidence() -> None:
 class FakeEvidenceMapper:
     def __init__(self, assessments: dict[str, EvidenceAssessment]) -> None:
         self.assessments = assessments
-        self.calls: list[tuple[str, SearchConstraints, list[EvidenceChunk]]] = []
+        self.calls: list[tuple[str, list[EvidenceCondition], list[EvidenceChunk]]] = []
 
     async def map_conditions(
         self,
         product_id: str,
-        constraints: SearchConstraints,
+        conditions: Sequence[EvidenceCondition],
         evidence: Sequence[EvidenceChunk],
     ) -> EvidenceAssessment:
-        self.calls.append((product_id, constraints, list(evidence)))
+        self.calls.append((product_id, list(conditions), list(evidence)))
         return self.assessments[product_id]
 
 
@@ -145,48 +158,111 @@ def _validated(
     )
 
 
-def test_required_unknown_feature_rejects_candidate() -> None:
+@pytest.mark.asyncio
+async def test_required_unknown_feature_keeps_candidate() -> None:
     product = _product("p1")
-    candidate = _candidate(product, 0.8)
-    service = EvidenceService(
-        catalog=_catalog([product]), mapper=FakeEvidenceMapper({})
+    assessment = EvidenceAssessment(
+        product_id="p1",
+        checks=[EvidenceCheck(condition="required:防水", status="unknown")],
     )
-    validated_required_unknown = _validated(
-        candidate,
-        eligible=False,
-        checks=[EvidenceCheck(condition="防水", status="unknown")],
-        rejection_reasons=["semantic_conditions_not_satisfied"],
-    )
+    mapper = FakeEvidenceMapper({"p1": assessment})
+    service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
 
-    selected = service.select_candidates(
-        validated=[validated_required_unknown],
-        limit=3,
-        constraints=SearchConstraints(required_features=["防水"]),
+    validated = await service.validate_candidates(
+        [_candidate(product, 0.8)],
+        SearchConstraints(required_features=["防水"]),
     )
 
-    assert selected == []
+    assert validated[0].eligible is True
+    assert validated[0].rejection_reasons == []
 
 
-def test_excluded_unknown_feature_rejects_candidate() -> None:
+@pytest.mark.asyncio
+async def test_excluded_unknown_feature_keeps_candidate() -> None:
     product = _product("p1")
-    candidate = _candidate(product, 0.8)
-    service = EvidenceService(
-        catalog=_catalog([product]), mapper=FakeEvidenceMapper({})
+    assessment = EvidenceAssessment(
+        product_id="p1",
+        checks=[EvidenceCheck(condition="excluded:入耳式", status="unknown")],
     )
-    validated_excluded_unknown = _validated(
-        candidate,
-        eligible=False,
-        checks=[EvidenceCheck(condition="不含入耳式", status="unknown")],
-        rejection_reasons=["semantic_conditions_not_satisfied"],
+    mapper = FakeEvidenceMapper({"p1": assessment})
+    service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
+
+    validated = await service.validate_candidates(
+        [_candidate(product, 0.8)],
+        SearchConstraints(excluded_features=["入耳式"]),
     )
 
-    selected = service.select_candidates(
-        validated=[validated_excluded_unknown],
-        limit=3,
-        constraints=SearchConstraints(excluded_features=["入耳式"]),
+    assert validated[0].eligible is True
+
+
+@pytest.mark.asyncio
+async def test_contradicted_feature_rejects_candidate() -> None:
+    product = _product("p1")
+    assessment = EvidenceAssessment(
+        product_id="p1",
+        checks=[
+            EvidenceCheck(
+                condition="required:防水",
+                status="contradicted",
+                evidence_ids=["p1:summary"],
+            )
+        ],
+    )
+    mapper = FakeEvidenceMapper({"p1": assessment})
+    service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
+
+    validated = await service.validate_candidates(
+        [_candidate(product, 0.8)],
+        SearchConstraints(required_features=["防水"]),
     )
 
-    assert selected == []
+    assert validated[0].eligible is False
+    assert validated[0].rejection_reasons == ["semantic_condition_contradicted"]
+
+
+@pytest.mark.asyncio
+async def test_missing_evidence_condition_is_parse_failure() -> None:
+    product = _product("p1")
+    mapper = FakeEvidenceMapper(
+        {"p1": EvidenceAssessment(product_id="p1", checks=[])}
+    )
+    service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
+
+    with pytest.raises(
+        ServiceError,
+        match="evidence conditions do not match request",
+    ):
+        await service.validate_candidates(
+            [_candidate(product, 0.8)],
+            SearchConstraints(required_features=["防水"]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_text_only_numeric_constraint_is_sent_to_evidence_mapper() -> None:
+    product = _product("p1")
+    numeric = NumericConstraint(
+        field="battery_capacity",
+        operator=">=",
+        value=5000,
+        unit="mAh",
+    )
+    assessment = EvidenceAssessment(
+        product_id="p1",
+        checks=[EvidenceCheck(condition=numeric.condition_id(), status="unknown")],
+    )
+    mapper = FakeEvidenceMapper({"p1": assessment})
+    service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
+
+    validated = await service.validate_candidates(
+        [_candidate(product, 0.8)],
+        SearchConstraints(numeric_constraints=[numeric]),
+    )
+
+    assert validated[0].eligible is True
+    assert [condition.condition_id for condition in mapper.calls[0][1]] == [
+        numeric.condition_id()
+    ]
 
 
 def test_no_semantic_constraints_selects_rerank_top_three() -> None:
@@ -258,7 +334,7 @@ async def test_validate_candidates_checks_catalog_category_brand_and_sku_price()
         "category_mismatch",
         "sub_category_mismatch",
         "brand_not_included",
-        "price_out_of_range",
+        "no_matching_sku",
     ]
 
 
@@ -275,7 +351,7 @@ async def test_conflicting_text_evidence_is_logged_and_not_selected_as_proof(
         product_id="p1",
         checks=[
             EvidenceCheck(
-                condition="防水",
+                condition="required:防水",
                 status="supported",
                 evidence_ids=["faq-decisive"],
                 conflicting_evidence_ids=["review-conflict"],
@@ -310,7 +386,7 @@ async def test_validate_candidates_rejects_unknown_evidence_id() -> None:
                 product_id="p1",
                 checks=[
                     EvidenceCheck(
-                        condition="防水",
+                        condition="required:防水",
                         status="supported",
                         evidence_ids=["not-in-candidate"],
                     )
@@ -344,12 +420,12 @@ async def test_validate_candidates_rejects_duplicate_evidence_condition() -> Non
                 product_id="p1",
                 checks=[
                     EvidenceCheck(
-                        condition="防水",
+                        condition="required:防水",
                         status="supported",
                         evidence_ids=["faq-supported"],
                     ),
                     EvidenceCheck(
-                        condition="防水",
+                        condition="required:防水",
                         status="unknown",
                         evidence_ids=["review-unknown"],
                     ),

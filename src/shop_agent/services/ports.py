@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator, Sequence
 from typing import Protocol
 
-from shop_agent.models.query import ParsedIntent, SearchConstraints
+from shop_agent.models.query import EvidenceCondition, ParsedIntent
 from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
 
 
@@ -29,7 +29,7 @@ class EvidenceMapper(Protocol):
     async def map_conditions(
         self,
         product_id: str,
-        constraints: SearchConstraints,
+        conditions: Sequence[EvidenceCondition],
         evidence: Sequence[EvidenceChunk],
     ) -> EvidenceAssessment:
         raise NotImplementedError

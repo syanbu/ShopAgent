@@ -34,9 +34,11 @@ class EvidenceCheck(BaseModel):
     conflicting_evidence_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def supported_requires_evidence(self) -> "EvidenceCheck":
+    def decisive_status_requires_evidence(self) -> "EvidenceCheck":
         if self.status == "supported" and not self.evidence_ids:
             raise ValueError("supported check requires evidence")
+        if self.status == "contradicted" and not self.evidence_ids:
+            raise ValueError("contradicted check requires evidence")
         return self
 
 

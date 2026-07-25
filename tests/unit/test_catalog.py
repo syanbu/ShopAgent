@@ -4,7 +4,7 @@ import pytest
 
 from shop_agent.catalog import ProductCatalog
 from shop_agent.models.product import Product
-from shop_agent.models.query import SearchConstraints
+from shop_agent.models.query import NumericConstraint, SearchConstraints
 
 
 def test_catalog_loads_and_resolves_image(
@@ -100,3 +100,128 @@ def test_repository_price_reference_matches_design_baseline() -> None:
     assert tshirt is not None
     assert (tshirt.sample_count, tshirt.median_min_sku_price) == (3, 129.0)
     assert tshirt.value_price_cap == 154.8
+
+
+def test_catalog_requires_price_and_size_on_same_sku(
+    sample_dataset_root: Path,
+    sample_product: Product,
+) -> None:
+    product = sample_product.model_copy(
+        update={
+            "category": "服饰运动",
+            "sub_category": "跑步鞋",
+            "skus": [
+                sample_product.skus[0].model_copy(
+                    update={"properties": {"鞋码": "42码"}, "price": 799}
+                ),
+                sample_product.skus[1].model_copy(
+                    update={"properties": {"鞋码": "43码"}, "price": 699}
+                ),
+            ],
+        }
+    )
+    catalog = ProductCatalog(
+        sample_dataset_root,
+        {product.product_id: product},
+        {product.product_id: "data/product.json"},
+    )
+
+    matched = catalog.matched_skus(
+        product.product_id,
+        SearchConstraints(max_price=700, sku_constraints={"size": ["42码"]}),
+    )
+
+    assert matched == []
+
+
+def test_catalog_returns_only_512gb_sku_inside_budget(
+    sample_dataset_root: Path,
+    sample_product: Product,
+) -> None:
+    product = sample_product.model_copy(
+        update={
+            "category": "数码电子",
+            "sub_category": "智能手机",
+            "skus": [
+                sample_product.skus[0].model_copy(
+                    update={"properties": {"存储": "256GB"}, "price": 6999}
+                ),
+                sample_product.skus[1].model_copy(
+                    update={"properties": {"存储配置": "512GB"}, "price": 7999}
+                ),
+            ],
+        }
+    )
+    catalog = ProductCatalog(
+        sample_dataset_root,
+        {product.product_id: product},
+        {product.product_id: "data/product.json"},
+    )
+
+    matched = catalog.matched_skus(
+        product.product_id,
+        SearchConstraints(
+            max_price=8000,
+            sku_constraints={"storage": ["512GB"]},
+        ),
+    )
+
+    assert [sku.price for sku in matched] == [7999]
+
+
+def test_catalog_compares_structured_numeric_sku_values(
+    sample_dataset_root: Path,
+    sample_product: Product,
+) -> None:
+    product = sample_product.model_copy(
+        update={
+            "category": "数码电子",
+            "sub_category": "智能手机",
+            "skus": [
+                sample_product.skus[0].model_copy(
+                    update={"properties": {"存储": "256GB"}}
+                ),
+                sample_product.skus[1].model_copy(
+                    update={"properties": {"存储": "1TB"}}
+                ),
+            ],
+        }
+    )
+    catalog = ProductCatalog(
+        sample_dataset_root,
+        {product.product_id: product},
+        {product.product_id: "data/product.json"},
+    )
+    constraints = SearchConstraints(
+        numeric_constraints=[
+            NumericConstraint(
+                field="storage",
+                operator=">=",
+                value=512,
+                unit="GB",
+            )
+        ]
+    )
+
+    assert [
+        sku.sku_id for sku in catalog.matched_skus(product.product_id, constraints)
+    ] == [sample_product.skus[1].sku_id]
+    assert catalog.unresolved_numeric_constraints(product.product_id, constraints) == []
+
+
+def test_catalog_leaves_text_only_numeric_condition_unresolved(
+    sample_dataset_root: Path,
+) -> None:
+    catalog = ProductCatalog.load(sample_dataset_root)
+    numeric = NumericConstraint(
+        field="battery_capacity",
+        operator=">=",
+        value=5000,
+        unit="mAh",
+    )
+    constraints = SearchConstraints(numeric_constraints=[numeric])
+
+    assert catalog.matched_skus("p_digital_001", constraints)
+    assert catalog.unresolved_numeric_constraints(
+        "p_digital_001", constraints
+    ) == [numeric]

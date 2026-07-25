@@ -19,9 +19,12 @@ from shop_agent.models.state import ShoppingState
 class FakeIntentParser:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.intent: ParsedIntent | None = None
 
     async def parse(self, message: str) -> ParsedIntent:
         self.calls.append(message)
+        if self.intent is not None:
+            return self.intent
         if message == "你好":
             return ParsedIntent(
                 schema_version=1,
@@ -98,7 +101,8 @@ class FakeRetrievalService:
 
 
 class FakeEvidenceService:
-    def __init__(self, *, eligible: bool) -> None:
+    def __init__(self, *, catalog: ProductCatalog, eligible: bool) -> None:
+        self.catalog = catalog
         self.eligible = eligible
         self.validate_calls: list[
             tuple[
@@ -143,17 +147,24 @@ class FakeEvidenceService:
         constraints: SearchConstraints,
     ) -> list[SelectedProduct]:
         self.select_calls.append((list(validated), limit, constraints))
-        return [
-            SelectedProduct(
-                product_id=item.candidate.product.product_id,
-                rerank_score=item.candidate.rerank_score or 0,
-                evidence_ids=[item.candidate.evidence[0].chunk_id],
-                decision_reasons=["rerank_selected"],
-                matched_sku_ids=[item.candidate.product.skus[0].sku_id],
+        selected: list[SelectedProduct] = []
+        for item in validated:
+            if not item.eligible:
+                continue
+            product_id = item.candidate.product.product_id
+            matched = self.catalog.matched_skus(product_id, constraints)
+            if not matched:
+                continue
+            selected.append(
+                SelectedProduct(
+                    product_id=product_id,
+                    rerank_score=item.candidate.rerank_score or 0,
+                    evidence_ids=[item.candidate.evidence[0].chunk_id],
+                    decision_reasons=["rerank_selected"],
+                    matched_sku_ids=[sku.sku_id for sku in matched],
+                )
             )
-            for item in validated
-            if item.eligible
-        ][:limit]
+        return selected[:limit]
 
 
 class FakeResponseGenerator:
@@ -200,7 +211,7 @@ def build_harness(
         ),
         parser=FakeIntentParser(),
         retrieval=FakeRetrievalService(products=products, return_hits=return_hits),
-        evidence=FakeEvidenceService(eligible=eligible),
+        evidence=FakeEvidenceService(catalog=catalog, eligible=eligible),
         response=FakeResponseGenerator(),
     )
 

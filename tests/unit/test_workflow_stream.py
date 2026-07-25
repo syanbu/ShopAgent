@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 from shop_agent.errors import ServiceError
+from shop_agent.models.query import ParsedIntent, SearchConstraints
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 from tests.unit.workflow_fakes import build_harness, initial_state
@@ -77,6 +78,35 @@ async def test_product_event_uses_catalog_facts_and_matched_skus(
         ],
         "image_url": "http://testserver/api/v1/products/p1/image",
     }
+
+
+@pytest.mark.asyncio
+async def test_product_event_uses_only_512gb_sku_price(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path, product_count=1)
+    product = harness.catalog.all()[0]
+    product.skus[0].properties = {"存储": "256GB"}
+    product.skus[0].price = 6999
+    product.skus[1].properties = {"存储配置": "512GB"}
+    product.skus[1].price = 7999
+    harness.parser.intent = ParsedIntent(
+        schema_version=1,
+        intent="product_search",
+        retrieval_query="512GB手机",
+        category="数码电子",
+        sub_category="智能手机",
+        constraints=SearchConstraints(
+            max_price=8000,
+            sku_constraints={"storage": ["512GB"]},
+        ),
+    )
+
+    parts = await _drain(_graph(harness), "推荐8000元以内的512GB手机")
+    product_data = parts[0]["data"]["data"]
+
+    assert product_data["display_price"] == 7999
+    assert [sku["properties"] for sku in product_data["matched_skus"]] == [
+        {"存储配置": "512GB"}
+    ]
 
 
 @pytest.mark.asyncio

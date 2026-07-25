@@ -1,6 +1,6 @@
 import json
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import TypeVar
 
 from openai import AsyncOpenAI
@@ -10,12 +10,17 @@ from pydantic import BaseModel, ValidationError
 
 from shop_agent.config import Settings
 from shop_agent.errors import ErrorCode, ServiceError
-from shop_agent.models.query import ParsedIntent, SearchConstraints
+from shop_agent.models.query import (
+    CanonicalSkuKey,
+    EvidenceCondition,
+    ParsedIntent,
+)
 from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
 
 
 logger = logging.getLogger(__name__)
 StructuredResult = TypeVar("StructuredResult", bound=BaseModel)
+SkuTaxonomy = Mapping[str, Mapping[CanonicalSkuKey, Sequence[str]]]
 RESPONSE_SYSTEM_PROMPT = (
     "你是文本导购助手。必须只使用 user 消息中提供的已校验事实作答。"
     "不得声称库存、优惠、优惠券或购买链接；不得补充已校验事实之外的功能、"
@@ -89,7 +94,9 @@ def _build_intent_system_prompt(
     sub_categories: Sequence[str],
     category_pairs: Sequence[tuple[str, str]],
     brands: Sequence[str] = (),
+    sku_taxonomy: SkuTaxonomy | None = None,
 ) -> str:
+    resolved_sku_taxonomy = sku_taxonomy or {}
     schema = ParsedIntent.model_json_schema()
     if brands:
         constraint_properties = schema["$defs"]["SearchConstraints"]["properties"]
@@ -106,6 +113,13 @@ def _build_intent_system_prompt(
             "sub_categories": list(sub_categories),
             "category_pairs": [list(pair) for pair in category_pairs],
             "brands": list(brands),
+            "sku_taxonomy": {
+                pair: {
+                    key: sorted(set(values))
+                    for key, values in sorted(attributes.items())
+                }
+                for pair, attributes in sorted(resolved_sku_taxonomy.items())
+            },
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -128,6 +142,8 @@ def _build_intent_system_prompt(
                         "exclude_brands": [],
                         "required_features": [],
                         "excluded_features": [],
+                        "sku_constraints": {},
+                        "numeric_constraints": [],
                     },
                 },
             },
@@ -147,6 +163,8 @@ def _build_intent_system_prompt(
                         "exclude_brands": [],
                         "required_features": [],
                         "excluded_features": [],
+                        "sku_constraints": {},
+                        "numeric_constraints": [],
                     },
                 },
             },
@@ -166,6 +184,8 @@ def _build_intent_system_prompt(
                         "exclude_brands": [],
                         "required_features": [],
                         "excluded_features": ["曲面屏"],
+                        "sku_constraints": {},
+                        "numeric_constraints": [],
                     },
                 },
             },
@@ -185,6 +205,50 @@ def _build_intent_system_prompt(
                         "exclude_brands": [],
                         "required_features": [],
                         "excluded_features": [],
+                        "sku_constraints": {},
+                        "numeric_constraints": [],
+                    },
+                },
+            },
+            {
+                "input": "推荐一双42码的跑步鞋",
+                "output": {
+                    "schema_version": 1,
+                    "intent": "product_search",
+                    "retrieval_query": "跑步鞋",
+                    "category": "服饰运动",
+                    "sub_category": "跑步鞋",
+                    "constraints": {
+                        "min_price": None,
+                        "max_price": None,
+                        "price_preference": None,
+                        "include_brands": [],
+                        "exclude_brands": [],
+                        "required_features": [],
+                        "excluded_features": [],
+                        "sku_constraints": {"size": ["42码"]},
+                        "numeric_constraints": [],
+                    },
+                },
+            },
+            {
+                "input": "推荐一款512GB存储的手机",
+                "output": {
+                    "schema_version": 1,
+                    "intent": "product_search",
+                    "retrieval_query": "手机",
+                    "category": "数码电子",
+                    "sub_category": "智能手机",
+                    "constraints": {
+                        "min_price": None,
+                        "max_price": None,
+                        "price_preference": None,
+                        "include_brands": [],
+                        "exclude_brands": [],
+                        "required_features": [],
+                        "excluded_features": [],
+                        "sku_constraints": {"storage": ["512GB"]},
+                        "numeric_constraints": [],
                     },
                 },
             },
@@ -210,9 +274,12 @@ def _build_intent_system_prompt(
         "6. taxonomy 数组非空时，category、sub_category、include_brands 和"
         "exclude_brands 只能使用其中的精确值；category_pairs 非空时必须使用"
         "有效组合。无法匹配类目时使用 null，品牌不得使用别名或自行造词。\n"
-        "7. 参考示例只说明字段语义，不是可识别句式列表。语义等价的表达必须"
+        "7. SKU 条件只能使用已识别子类开放的规范 key 和候选值；离散的尺码、"
+        "颜色、存储版本、口味等写入 sku_constraints。带至少、大于、小于等比较"
+        "关系的条件写入 numeric_constraints，不得同时复制到 required_features。\n"
+        "8. 参考示例只说明字段语义，不是可识别句式列表。语义等价的表达必须"
         "映射到相同字段。\n"
-        "8. 输出前在内部检查用户明确表达的每项约束是否都已映射，最终仍只输出 "
+        "9. 输出前在内部检查用户明确表达的每项约束是否都已映射，最终仍只输出 "
         "JSON 对象。\n"
         f"输出 JSON Schema：{schema_json}\n"
         f"可用 taxonomy：{taxonomy_json}\n"
@@ -229,32 +296,64 @@ class DashScopeIntentParser(_DashScopeChatGateway):
         sub_categories: Sequence[str] = (),
         category_pairs: Sequence[tuple[str, str]] = (),
         brands: Sequence[str] = (),
+        sku_taxonomy: SkuTaxonomy | None = None,
     ) -> None:
         super().__init__(settings)
         self._categories = tuple(sorted(set(categories)))
         self._sub_categories = tuple(sorted(set(sub_categories)))
         self._category_pairs = tuple(sorted(set(category_pairs)))
         self._brands = tuple(sorted(set(brands)))
+        self._sku_taxonomy = {
+            pair: {
+                key: tuple(sorted(set(values)))
+                for key, values in sorted(attributes.items())
+            }
+            for pair, attributes in sorted((sku_taxonomy or {}).items())
+        }
         self._system_prompt = _build_intent_system_prompt(
             categories=self._categories,
             sub_categories=self._sub_categories,
             category_pairs=self._category_pairs,
             brands=self._brands,
+            sku_taxonomy=self._sku_taxonomy,
         )
 
     def _validate_intent(self, content: str) -> ParsedIntent:
         parsed = ParsedIntent.model_validate_json(content)
-        if not self._brands:
+        if self._brands:
+            submitted_brands = {
+                *parsed.constraints.include_brands,
+                *parsed.constraints.exclude_brands,
+            }
+            unknown_brands = sorted(submitted_brands.difference(self._brands))
+            if unknown_brands:
+                raise ValueError(
+                    f"brand values {unknown_brands} must be exact catalog values "
+                    f"from {list(self._brands)}"
+                )
+        if parsed.intent != "product_search":
             return parsed
-        submitted_brands = {
-            *parsed.constraints.include_brands,
-            *parsed.constraints.exclude_brands,
+        if parsed.category is None or parsed.sub_category is None:
+            if parsed.constraints.sku_constraints:
+                raise ValueError(
+                    "SKU constraints require category and sub_category"
+                )
+            return parsed
+        pair = f"{parsed.category}/{parsed.sub_category}"
+        allowed = self._sku_taxonomy.get(pair, {})
+        unknown_keys = sorted(
+            set(parsed.constraints.sku_constraints).difference(allowed)
+        )
+        if unknown_keys:
+            raise ValueError(f"SKU keys {unknown_keys} are not available for {pair}")
+        invalid_values = {
+            key: sorted(set(values).difference(allowed[key]))
+            for key, values in parsed.constraints.sku_constraints.items()
+            if set(values).difference(allowed[key])
         }
-        unknown_brands = sorted(submitted_brands.difference(self._brands))
-        if unknown_brands:
+        if invalid_values:
             raise ValueError(
-                f"brand values {unknown_brands} must be exact catalog values "
-                f"from {list(self._brands)}"
+                f"SKU values {invalid_values} are not available for {pair}"
             )
         return parsed
 
@@ -292,7 +391,7 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
     async def map_conditions(
         self,
         product_id: str,
-        constraints: SearchConstraints,
+        conditions: Sequence[EvidenceCondition],
         evidence: Sequence[EvidenceChunk],
     ) -> EvidenceAssessment:
         chunks = [
@@ -313,7 +412,12 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
                     "use a user review to prove an official specification. For an "
                     "excluded feature, supported means the evidence explicitly proves "
                     "the product does not have the excluded feature; a missing mention "
-                    "is unknown. Return JSON matching EvidenceAssessment."
+                    "is unknown. Return every supplied condition_id exactly once in "
+                    "EvidenceCheck.condition. supported and contradicted require "
+                    "decisive evidence_ids; conflicting_evidence_ids contains only "
+                    "losing-side evidence. unknown means the evidence is insufficient; "
+                    "contradicted means the evidence explicitly violates the condition. "
+                    "Return JSON matching EvidenceAssessment."
                 ),
             },
             {
@@ -327,7 +431,10 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
                     + json.dumps(
                         {
                             "product_id": product_id,
-                            "constraints": constraints.model_dump(),
+                            "conditions": [
+                                condition.model_dump(mode="json")
+                                for condition in conditions
+                            ],
                             "evidence": chunks,
                         },
                         ensure_ascii=False,

@@ -10,7 +10,7 @@ from shop_agent.catalog import ProductCatalog
 from shop_agent.cli.index_products import index_catalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
-from shop_agent.models.query import ParsedIntent, SearchConstraints
+from shop_agent.models.query import EvidenceCondition, ParsedIntent, SearchConstraints
 from shop_agent.models.retrieval import EvidenceChunk
 from shop_agent.services.dashscope_chat import (
     DashScopeEvidenceMapper,
@@ -71,6 +71,73 @@ def test_intent_prompt_contains_schema_constraints_and_taxonomy_contract() -> No
     assert '"categories":["数码电子"]' in prompt
     assert '"brands":["Apple 苹果","Nike 耐克"]' in prompt
     assert prompt.count('"enum":["Apple 苹果","Nike 耐克"]') == 2
+
+
+def test_intent_prompt_contains_compact_sku_taxonomy(settings: Settings) -> None:
+    parser = DashScopeIntentParser(
+        settings,
+        categories=["数码电子", "服饰运动"],
+        sub_categories=["智能手机", "跑步鞋"],
+        category_pairs=[("数码电子", "智能手机"), ("服饰运动", "跑步鞋")],
+        sku_taxonomy={
+            "数码电子/智能手机": {
+                "storage": ["256GB", "512GB"],
+                "color": ["黑色"],
+            },
+            "服饰运动/跑步鞋": {"size": ["42码"]},
+        },
+    )
+
+    prompt = parser._system_prompt
+
+    assert '"sku_taxonomy"' in prompt
+    assert '"storage":["256GB","512GB"]' in prompt
+    assert "SKU 条件只能使用已识别子类开放的规范 key" in prompt
+    assert len(prompt) < 100_000
+
+
+def test_intent_validator_rejects_cross_subcategory_sku_key(
+    settings: Settings,
+) -> None:
+    parser = DashScopeIntentParser(
+        settings,
+        category_pairs=[("数码电子", "智能手机")],
+        sku_taxonomy={
+            "数码电子/智能手机": {"storage": ["512GB"]},
+        },
+    )
+    content = ParsedIntent(
+        schema_version=1,
+        intent="product_search",
+        retrieval_query="手机",
+        category="数码电子",
+        sub_category="智能手机",
+        constraints=SearchConstraints(sku_constraints={"size": ["42码"]}),
+    ).model_dump_json()
+
+    with pytest.raises(ValueError, match="SKU keys"):
+        parser._validate_intent(content)
+
+
+def test_intent_validator_rejects_unknown_sku_value(settings: Settings) -> None:
+    parser = DashScopeIntentParser(
+        settings,
+        category_pairs=[("数码电子", "智能手机")],
+        sku_taxonomy={
+            "数码电子/智能手机": {"storage": ["512GB"]},
+        },
+    )
+    content = ParsedIntent(
+        schema_version=1,
+        intent="product_search",
+        retrieval_query="手机",
+        category="数码电子",
+        sub_category="智能手机",
+        constraints=SearchConstraints(sku_constraints={"storage": ["2TB"]}),
+    ).model_dump_json()
+
+    with pytest.raises(ValueError, match="SKU values"):
+        parser._validate_intent(content)
 
 
 @pytest.mark.asyncio
@@ -325,7 +392,7 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
 ) -> None:
     create = AsyncMock(
         return_value=_chat_response(
-            '{"product_id":"p1","checks":[{"condition":"防水",'
+            '{"product_id":"p1","checks":[{"condition":"required:防水",'
             '"status":"supported","evidence_ids":["faq-1"],'
             '"conflicting_evidence_ids":["review-1"]}]}'
         )
@@ -354,11 +421,25 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
 
     with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
         assessment = await DashScopeEvidenceMapper(settings).map_conditions(
-            "p1", SearchConstraints(required_features=["防水"]), evidence
+            "p1",
+            [
+                EvidenceCondition(
+                    condition_id="required:防水",
+                    kind="required_feature",
+                    expression="商品具备：防水",
+                )
+            ],
+            evidence,
         )
 
     assert create.await_args is not None
-    prompt = create.await_args.kwargs["messages"][-1]["content"]
+    messages = create.await_args.kwargs["messages"]
+    system_prompt = messages[0]["content"]
+    prompt = messages[-1]["content"]
+    assert "supported and contradicted require decisive evidence_ids" in system_prompt
+    assert (
+        "conflicting_evidence_ids contains only losing-side evidence" in system_prompt
+    )
     assert "official_faq > product_summary > user_review" in prompt
     assert "never use a user review to prove an official specification" in prompt
     assert "does not have the excluded feature" in prompt
@@ -381,7 +462,7 @@ async def test_evidence_mapper_maps_upstream_failure_to_parse_error(
     with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
         with pytest.raises(ServiceError) as error:
             await DashScopeEvidenceMapper(settings).map_conditions(
-                "p1", SearchConstraints(), []
+                "p1", [], []
             )
 
     assert error.value.code == "EVIDENCE_PARSE_FAILED"

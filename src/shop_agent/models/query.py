@@ -3,6 +3,61 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+CanonicalSkuKey = Literal[
+    "accent_color",
+    "add_on_service",
+    "capacity",
+    "charging_case",
+    "chip",
+    "color",
+    "custom_service",
+    "fit",
+    "flavor",
+    "gender",
+    "hat_adjustment",
+    "hat_fit",
+    "memory",
+    "memory_configuration",
+    "network_version",
+    "package_count",
+    "package_type",
+    "pants_length",
+    "product_type",
+    "screen_size",
+    "shade",
+    "shoe_last",
+    "size",
+    "specification",
+    "storage",
+    "target_audience",
+    "version",
+]
+NumericOperator = Literal["==", ">", ">=", "<", "<="]
+EvidenceConditionKind = Literal[
+    "required_feature",
+    "excluded_feature",
+    "numeric",
+]
+
+
+class NumericConstraint(BaseModel):
+    field: str = Field(min_length=1)
+    operator: NumericOperator
+    value: float
+    unit: str = Field(min_length=1)
+
+    def condition_id(self) -> str:
+        value = format(self.value, "g")
+        return f"numeric:{self.field}:{self.operator}:{value}:{self.unit}"
+
+
+class EvidenceCondition(BaseModel):
+    condition_id: str
+    kind: EvidenceConditionKind
+    expression: str
+    numeric_constraint: NumericConstraint | None = None
+
+
 class SearchConstraints(BaseModel):
     min_price: float | None = Field(
         default=None,
@@ -34,16 +89,69 @@ class SearchConstraints(BaseModel):
         default_factory=list,
         description="商品不得具备的场景、功能或属性；未提出时为空数组。",
     )
+    sku_constraints: dict[CanonicalSkuKey, list[str]] = Field(
+        default_factory=dict,
+        description="按规范 SKU key 表达的离散规格硬条件。",
+    )
+    numeric_constraints: list[NumericConstraint] = Field(
+        default_factory=list,
+        description="带比较符和单位的数值条件。",
+    )
 
     @model_validator(mode="after")
-    def validate_price_range(self) -> "SearchConstraints":
+    def validate_constraint_consistency(self) -> "SearchConstraints":
         if (
             self.min_price is not None
             and self.max_price is not None
             and self.min_price > self.max_price
         ):
             raise ValueError("min_price cannot exceed max_price")
+        for values in self.sku_constraints.values():
+            if not values:
+                raise ValueError("sku constraint values cannot be empty")
+            if any(not value.strip() for value in values):
+                raise ValueError("sku constraint values cannot be blank")
+        overlap = set(self.required_features).intersection(self.excluded_features)
+        if overlap:
+            raise ValueError("feature cannot be both required and excluded")
+        numeric_ids = [item.condition_id() for item in self.numeric_constraints]
+        if len(numeric_ids) != len(set(numeric_ids)):
+            raise ValueError("numeric constraints cannot be duplicated")
         return self
+
+
+def build_evidence_conditions(
+    constraints: SearchConstraints,
+) -> list[EvidenceCondition]:
+    conditions = [
+        EvidenceCondition(
+            condition_id=f"required:{feature}",
+            kind="required_feature",
+            expression=f"商品具备：{feature}",
+        )
+        for feature in constraints.required_features
+    ]
+    conditions.extend(
+        EvidenceCondition(
+            condition_id=f"excluded:{feature}",
+            kind="excluded_feature",
+            expression=f"商品不具备：{feature}",
+        )
+        for feature in constraints.excluded_features
+    )
+    conditions.extend(
+        EvidenceCondition(
+            condition_id=item.condition_id(),
+            kind="numeric",
+            expression=(
+                f"{item.field} {item.operator} "
+                f"{format(item.value, 'g')} {item.unit}"
+            ),
+            numeric_constraint=item,
+        )
+        for item in constraints.numeric_constraints
+    )
+    return conditions
 
 
 class CategoryPriceReference(BaseModel):
