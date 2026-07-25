@@ -12,7 +12,7 @@ from shop_agent.cli.index_products import index_catalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
 from shop_agent.models.query import EvidenceCondition, ParsedIntent, SearchConstraints
-from shop_agent.models.retrieval import EvidenceChunk
+from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
 from shop_agent.services.dashscope_chat import (
     DashScopeEvidenceMapper,
     DashScopeIntentParser,
@@ -393,7 +393,7 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     create = AsyncMock(
-        return_value=_chat_response(
+        return_value=_tool_call_response(
             '{"product_id":"p1","checks":[{"condition":"required:防水",'
             '"status":"supported","evidence_ids":["faq-1"],'
             '"conflicting_evidence_ids":["review-1"]}]}'
@@ -422,7 +422,9 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
     ]
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
-        with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        with patch(
+            "shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client
+        ):
             assessment = await DashScopeEvidenceMapper(settings).map_conditions(
                 "p1",
                 [
@@ -451,6 +453,28 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
         value in prompt for value in ("faq-1", "official_faq", "官方说明支持防水")
     )
     assert assessment.checks[0].conflicting_evidence_ids == ["review-1"]
+    request = create.await_args.kwargs
+    assert "response_format" not in request
+    assert request["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "submit_evidence_assessment"},
+    }
+    tool = request["tools"][0]["function"]
+    assert tool["name"] == "submit_evidence_assessment"
+    parameters = tool["parameters"]
+    assert parameters["required"] == ["product_id", "checks"]
+    assert parameters["additionalProperties"] is False
+    checks_schema = parameters["properties"]["checks"]
+    assert checks_schema["minItems"] == 1
+    assert checks_schema["maxItems"] == 1
+    check_schema = checks_schema["items"]
+    assert check_schema["properties"]["condition"]["enum"] == ["required:防水"]
+    assert check_schema["properties"]["status"]["enum"] == [
+        "supported",
+        "contradicted",
+        "unknown",
+    ]
+    assert check_schema["additionalProperties"] is False
     input_message = next(
         record.getMessage()
         for record in caplog.records
@@ -476,19 +500,54 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
     assert "用户称不防水" not in input_message
 
 
+def _tool_call_response(
+    arguments: str,
+    *,
+    name: str = "submit_evidence_assessment",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="chatcmpl-test",
+        model="qwen3.7-max",
+        created=0,
+        choices=[
+            SimpleNamespace(
+                index=0,
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call-evidence-test",
+                            type="function",
+                            function=SimpleNamespace(
+                                name=name,
+                                arguments=arguments,
+                            ),
+                        )
+                    ],
+                ),
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+
 @pytest.mark.asyncio
 async def test_evidence_mapper_logs_raw_model_output_as_single_line_json(
     settings: Settings,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    raw_content = '{\n  "product_id": "p1",\n  "checks": []\n}'
-    create = AsyncMock(return_value=_chat_response(raw_content))
+    raw_arguments = '{\n  "product_id": "p1",\n  "checks": []\n}'
+    create = AsyncMock(return_value=_tool_call_response(raw_arguments))
     client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
-        with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        with patch(
+            "shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client
+        ):
             await DashScopeEvidenceMapper(settings).map_conditions("p1", [], [])
 
     raw_message = next(
@@ -499,7 +558,7 @@ async def test_evidence_mapper_logs_raw_model_output_as_single_line_json(
     assert "\n" not in raw_message
     assert json.loads(raw_message.removeprefix("evidence_model_raw_output ")) == {
         "product_id": "p1",
-        "content": raw_content,
+        "arguments": raw_arguments,
     }
 
 
@@ -526,8 +585,8 @@ async def test_evidence_mapper_retries_until_each_condition_id_is_returned_once(
     )
     create = AsyncMock(
         side_effect=[
-            _chat_response(invalid_content),
-            _chat_response(corrected_content),
+            _tool_call_response(invalid_content),
+            _tool_call_response(corrected_content),
         ]
     )
     client = SimpleNamespace(
@@ -554,6 +613,30 @@ async def test_evidence_mapper_retries_until_each_condition_id_is_returned_once(
 
 
 @pytest.mark.asyncio
+async def test_evidence_mapper_retries_when_submission_tool_is_missing(
+    settings: Settings,
+) -> None:
+    corrected_content = '{"product_id":"p1","checks":[]}'
+    create = AsyncMock(
+        side_effect=[
+            _chat_response('{"product_id":"p1","checks":[]}'),
+            _tool_call_response(corrected_content),
+        ]
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        assessment = await DashScopeEvidenceMapper(settings).map_conditions(
+            "p1", [], []
+        )
+
+    assert create.await_count == 2
+    assert assessment == EvidenceAssessment(product_id="p1", checks=[])
+
+
+@pytest.mark.asyncio
 async def test_evidence_mapper_maps_upstream_failure_to_parse_error(
     settings: Settings,
 ) -> None:
@@ -564,9 +647,7 @@ async def test_evidence_mapper_maps_upstream_failure_to_parse_error(
 
     with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
         with pytest.raises(ServiceError) as error:
-            await DashScopeEvidenceMapper(settings).map_conditions(
-                "p1", [], []
-            )
+            await DashScopeEvidenceMapper(settings).map_conditions("p1", [], [])
 
     assert error.value.code == "EVIDENCE_PARSE_FAILED"
     assert error.value.retryable is True

@@ -2,7 +2,7 @@
 
 > 状态：已完成
 >
-> 代码入口：`src/shop_agent/models/`, `src/shop_agent/catalog.py`, `src/shop_agent/chunking.py`, `src/shop_agent/services/`, `src/shop_agent/workflow/`, `src/shop_agent/api/`, `src/shop_agent/cli/index_products.py`, `tests/live/test_live_shopping_flow.py`, `compose.yaml`
+> 代码入口：`src/shop_agent/models/`, `src/shop_agent/catalog.py`, `src/shop_agent/chunking.py`, `src/shop_agent/services/`, `src/shop_agent/workflow/`, `src/shop_agent/api/`, `src/shop_agent/cli/index_products.py`, `scripts/chat_client.py`, `tests/live/test_live_shopping_flow.py`, `compose.yaml`
 
 ## 功能目标
 
@@ -233,11 +233,17 @@ Catalog 启动加载时按 `category + sub_category` 建立只读价格基准。
 候选准入规则：
 
 - 结构化条件不满足时淘汰。
-- 必需属性为 `contradicted` 或 `unknown` 时淘汰。
-- 排除属性没有明确证据证明不包含时淘汰。
+- 必需属性和排除属性使用相同的宽松三态准入规则：`supported` 与 `unknown` 均保留，只有 `contradicted` 淘汰。
+- `unknown` 仅表示现有商品证据不足以判断，不能在回复中宣称该条件已经得到明确满足。
 - 没有额外属性条件时，按重排序分数选择最多三个商品。
 
-候选决策保存 `rerank_score`、`evidence_ids`、`decision_reasons` 和淘汰原因。第一阶段不计算人为加权总分。后续七维评分需要单独的功能设计和评测集，确认维度定义、分数校准、子品类基准价、评价先验和权重后再接入。
+候选决策保存 `rerank_score`、`evidence_ids`、`decision_reasons` 和淘汰原因。当前 `supported` 与 `unknown` 候选均沿用重排序分数参与选择，不额外调整优先级。后续七维评分需要单独的功能设计和评测集，确认维度定义、分数校准、子品类基准价、评价先验和权重后再接入。
+
+`validate_evidence` 节点在单轮请求内部并发校验候选商品，最多同时执行五个
+`EvidenceMapper.map_conditions()` 调用。并发限制只作用于当前请求，不设置进程级
+或部署级全局限流；模型调用总数不变。返回的 `ValidatedCandidate` 顺序保持与重排后
+候选顺序一致，不受各模型请求完成先后影响。任一证据调用失败时，同轮尚未完成的
+证据任务会被取消并等待清理，原始 `ServiceError` 继续交给现有工作流错误链路。
 
 ## 关键决策
 
@@ -296,6 +302,11 @@ uv run uvicorn shop_agent.api.app:app --reload
 ```bash
 .venv/bin/python scripts/chat_client.py --message "推荐一款降噪耳机"
 ```
+
+客户端使用单调时钟记录每轮从发起 HTTP 请求到收到 `message_end` 的总耗时，
+并在结束行输出三位小数的秒数，例如 `elapsed=2.500s`。HTTP、网络或 SSE
+协议错误没有结束事件时，耗时附加在对应的 `[客户端错误]` 行；该字段仅用于本地
+观测，不修改 SSE 协议或服务端事件结构。
 
 本地接口：
 
@@ -373,3 +384,6 @@ Unicode 分隔符。用户提供的关联标识不能拆分或伪造额外日志
 | 2026-07-24 | 统一品牌事实并约束意图品牌枚举 | 规范 Apple、Nike 与北面品牌值，将 catalog 品牌注入 JSON Schema，并拒绝模型生成的越界品牌 |
 | 2026-07-24 | 保持意图日志中文可读 | 使用非 ASCII 保留序列化，同时显式转义 Unicode 行分隔符，兼顾终端可读性与单行日志安全 |
 | 2026-07-24 | 增加性价比价格偏好与子品类价格编译 | 将模糊价格语义与证据属性分离，以 Catalog 动态中位数生成统一生效约束，并在信息不足时短路澄清 |
+| 2026-07-25 | 为测试客户端增加单轮总耗时 | 从请求发起到结束事件使用单调时钟计时，并在正常结束和客户端错误日志中输出秒数，便于定位慢请求 |
+| 2026-07-25 | 明确语义证据的宽松准入规则 | 必需与排除条件统一保留 `supported` 和 `unknown` 候选，只淘汰 `contradicted`；评分与优先级调整留待后续设计 |
+| 2026-07-25 | 将候选证据判断改为单轮最多五个并发调用 | 重叠等待最多十个独立模型请求，保持模型调用次数、候选顺序、三态准入和错误语义不变 |

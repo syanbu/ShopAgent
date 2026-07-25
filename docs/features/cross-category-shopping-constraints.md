@@ -13,7 +13,7 @@
 - 使用原始商品 JSON 中真实存在的类目、子类目、商品、SKU、价格和商品证据。
 - 区分类目范围、价格与品牌、SKU 属性、数值条件和语义特征。
 - 在同一个 SKU 上联合检查价格与 SKU 属性，避免使用其他规格的最低价错误匹配用户需要的规格。
-- 对原始数据没有提供充分证据的语义特征标记为 `unknown`，保留候选但降低后续排序优先级，而不是直接淘汰。
+- 对原始数据没有提供充分证据的语义特征标记为 `unknown` 并保留候选，而不是直接淘汰；排序优先级留待后续评分系统设计。
 - 不允许模型根据常识补充原始商品数据中不存在的能力、规格或属性。
 
 ## 范围
@@ -76,7 +76,7 @@
        -> matched_skus 为空时淘汰商品
   -> 验证 required_features / excluded_features
        -> supported：明确满足条件
-       -> unknown：证据不足，保留候选并降低后续排序优先级
+       -> unknown：证据不足，保留候选
        -> contradicted：明确违反条件，淘汰候选
   -> 排序并返回商品卡片
 ```
@@ -263,8 +263,8 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 
 | 状态 | 含义 | 候选行为 |
 |---|---|---|
-| `supported` | 商品证据明确证明满足用户条件 | 保留，后续排序优先 |
-| `unknown` | 原始数据没有足够证据判断 | 保留，后续排序降级 |
+| `supported` | 商品证据明确证明满足用户条件 | 保留 |
+| `unknown` | 原始数据没有足够证据判断 | 保留 |
 | `contradicted` | 商品证据明确证明违反用户条件 | 淘汰 |
 
 `supported` 和 `contradicted` 都必须携带决定性的 `evidence_ids`；只有
@@ -274,6 +274,12 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 对于排除条件，“不含咖啡因”有明确官方证据时为 `supported`；商品完全没有提到咖啡因时为 `unknown`；明确含咖啡因时为 `contradicted`。
 
 用户表达的条件应完整保留。意图阶段不能因为商品目录可能没有对应证据而删除 feature；证据验证阶段负责产生三态结果。
+
+证据模型通过强制 Function Calling 返回三态结果。应用为每个候选注册无副作用的 `submit_evidence_assessment` 工具，并使用扁平 JSON Schema 约束 `product_id`、`checks[].condition`、`status` 和证据 ID 数组。模型返回的 `tool_calls[0].function.arguments` 仍需经过严格 Pydantic 校验和 condition ID 精确覆盖校验；首次工具调用缺失、字段非法或条件覆盖错误时，进入现有的一次自动纠错。
+
+一轮请求对重排后的候选分别调用证据模型，调用次数不因并发而减少；服务使用当前
+请求内的信号量将并发上限固定为五，不设置跨请求的全局限制。结果按输入候选顺序
+收集，单个调用失败时取消并清理同轮其他任务，并原样传播现有 `ServiceError`。
 
 ## 关键决策
 
@@ -291,7 +297,7 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 
 ### unknown 不作为硬过滤条件
 
-语义特征缺少证据时不能宣称满足，也不直接淘汰商品。候选保留并在后续排序中低于明确 `supported` 的候选。具体排序权重和补位策略留给后续设计。
+语义特征缺少证据时不能宣称满足，也不直接淘汰商品。当前 `unknown` 与 `supported` 候选均进入基于 `rerank_score` 的选择流程，不额外调整优先级；具体排序权重、综合评分和补位策略留给后续设计。
 
 ### 不把所有用户表达都预定义为 feature 枚举
 
@@ -310,7 +316,7 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 - `src/shop_agent/models/query.py`：分层约束、SKU 约束和数值约束模型。
 - `src/shop_agent/sku_attributes.py`：59种原始 key 的规范映射、taxonomy 和数值单位归一化。
 - `src/shop_agent/catalog.py`：规范属性目录、SKU 规范化视图和同一 SKU 联合匹配。
-- `src/shop_agent/services/dashscope_chat.py`：向意图模型提供当前子类允许的规范 key 与值，并在证据结构化调用的自动纠错范围内校验 condition ID 完整覆盖。
+- `src/shop_agent/services/dashscope_chat.py`：向意图模型提供当前子类允许的规范 key 与值；证据模型使用强制 Function Calling，并在自动纠错范围内校验工具参数和 condition ID 完整覆盖。
 - `src/shop_agent/services/evidence.py`：执行结构化硬过滤和语义三态候选准入。
 - `src/shop_agent/workflow/`：在检索、证据验证和候选决策之间传递新约束与匹配 SKU。
 
@@ -329,15 +335,17 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 - `display_price` 来自过滤后的 `matched_skus`，不使用其他规格的最低价。
 - `supported` 候选保留，`unknown` 候选也保留，`contradicted` 候选淘汰。
 - `supported` 和 `contradicted` 缺少决定性 `evidence_ids` 时，证据响应校验失败，不能据此保留或淘汰商品。
+- 证据输出使用强制 `submit_evidence_assessment` 工具调用；正常结果只调用一次模型，返回字段由扁平工具参数 Schema 约束。
 - 证据模型遗漏、改写或重复 condition ID 时，第一次响应校验失败并进入现有的一次自动纠错；正常响应仍只调用一次证据模型。
+- 工具参数遗漏 `checks` 或包含 Schema 之外的字段时，严格 Pydantic 校验拒绝该响应。
 - 商品 JSON 没有证据时，模型不能将语义条件判定为 `supported`。
 - 原有无 SKU 属性条件的价格检索行为保持兼容。
 
 验证命令与结果：
 
-- `uv run pytest tests/unit tests/integration -q -rs`：170 passed；本次本地 Qdrant 集成测试实际执行并通过。
+- `uv run pytest -q -p no:cacheprovider`：176 passed，1 skipped；本次本地 Qdrant 集成测试实际执行并通过。
 - `uv run ruff check .`：通过。
-- `uv run mypy src`：33个源文件通过。
+- `uv run mypy src scripts`：34个源文件通过。
 - 真实数据专项测试：3 passed，确认4个一级类目、37个子类、100个商品及全部59种原始 SKU key 均可加载和规范化。
 
 ## 变更记录
@@ -349,3 +357,6 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 | 2026-07-25 | 要求 contradicted 携带决定性证据 | 防止证据模型在没有原始商品证据时淘汰候选，并明确冲突证据不能替代决定性证据 |
 | 2026-07-25 | 状态调整为开发中并记录真实请求缺陷 | 复合子类短语仍可能误解析，证据条件覆盖错误仍会终止整个流；同时更新本地 Qdrant 已实际通过的验证结果 |
 | 2026-07-25 | 将证据 condition ID 覆盖校验纳入结构化调用纠错 | 缺失、改写或重复 ID 时允许模型纠正一次，避免首次可纠正输出直接终止 SSE |
+| 2026-07-25 | 明确 unknown 统一宽松准入且暂不调整排序 | 避免细分条件因证据不足导致无商品可展示，并将 supported/unknown 的优先级交给后续评分系统设计 |
+| 2026-07-25 | 将单轮证据模型调用并发上限固定为五 | 降低最多十个候选逐个等待造成的总耗时，不引入商业部署级全局限流或改变候选顺序 |
+| 2026-07-25 | 证据输出改为强制 Function Calling | 通过扁平工具参数 Schema 固定返回字段，并保留 Pydantic 与动态 condition ID 校验作为本地保障 |

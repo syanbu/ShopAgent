@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -19,6 +20,7 @@ from shop_agent.services.ports import EvidenceMapper
 
 
 logger = logging.getLogger(__name__)
+_EVIDENCE_CONCURRENCY_LIMIT = 5
 _UNICODE_LINE_SEPARATOR_ESCAPES = str.maketrans(
     {
         "\u0085": "\\u0085",
@@ -54,47 +56,73 @@ class EvidenceService:
         category: str | None = None,
         sub_category: str | None = None,
     ) -> list[ValidatedCandidate]:
-        validated: list[ValidatedCandidate] = []
-        for candidate in candidates:
-            product = self._catalog.get(candidate.product.product_id)
-            rejection_reasons = self._structured_rejections(
-                product.product_id,
-                product.category,
-                product.sub_category,
-                product.brand,
-                constraints,
-                category=category,
-                sub_category=sub_category,
+        semaphore = asyncio.Semaphore(_EVIDENCE_CONCURRENCY_LIMIT)
+        tasks = [
+            asyncio.create_task(
+                self._validate_candidate(
+                    candidate,
+                    constraints,
+                    category=category,
+                    sub_category=sub_category,
+                    semaphore=semaphore,
+                )
             )
-            assessment = EvidenceAssessment(product_id=product.product_id)
-            unresolved_numeric = self._catalog.unresolved_numeric_constraints(
-                product.product_id,
-                constraints,
-            )
-            evidence_constraints = constraints.model_copy(
-                update={"numeric_constraints": unresolved_numeric}
-            )
-            conditions = build_evidence_conditions(evidence_constraints)
-            if conditions and not rejection_reasons:
+            for candidate in candidates
+        ]
+        try:
+            return await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    async def _validate_candidate(
+        self,
+        candidate: ProductCandidate,
+        constraints: SearchConstraints,
+        *,
+        category: str | None,
+        sub_category: str | None,
+        semaphore: asyncio.Semaphore,
+    ) -> ValidatedCandidate:
+        product = self._catalog.get(candidate.product.product_id)
+        rejection_reasons = self._structured_rejections(
+            product.product_id,
+            product.category,
+            product.sub_category,
+            product.brand,
+            constraints,
+            category=category,
+            sub_category=sub_category,
+        )
+        assessment = EvidenceAssessment(product_id=product.product_id, checks=[])
+        unresolved_numeric = self._catalog.unresolved_numeric_constraints(
+            product.product_id,
+            constraints,
+        )
+        evidence_constraints = constraints.model_copy(
+            update={"numeric_constraints": unresolved_numeric}
+        )
+        conditions = build_evidence_conditions(evidence_constraints)
+        if conditions and not rejection_reasons:
+            async with semaphore:
                 assessment = await self._mapper.map_conditions(
                     product.product_id,
                     conditions,
                     candidate.evidence,
                 )
-                self._validate_assessment(candidate, assessment, conditions)
-                self._log_conflicts(candidate, assessment)
-                if not semantic_conditions_allow_candidate(assessment):
-                    rejection_reasons.append("semantic_condition_contradicted")
+            self._validate_assessment(candidate, assessment, conditions)
+            self._log_conflicts(candidate, assessment)
+            if not semantic_conditions_allow_candidate(assessment):
+                rejection_reasons.append("semantic_condition_contradicted")
 
-            validated.append(
-                ValidatedCandidate(
-                    candidate=candidate,
-                    assessment=assessment,
-                    eligible=not rejection_reasons,
-                    rejection_reasons=rejection_reasons,
-                )
-            )
-        return validated
+        return ValidatedCandidate(
+            candidate=candidate,
+            assessment=assessment,
+            eligible=not rejection_reasons,
+            rejection_reasons=rejection_reasons,
+        )
 
     def select_candidates(
         self,
@@ -193,9 +221,7 @@ class EvidenceService:
                 "duplicate evidence condition",
                 retryable=False,
             )
-        expected_conditions = {
-            condition.condition_id for condition in conditions
-        }
+        expected_conditions = {condition.condition_id for condition in conditions}
         returned_conditions = {check.condition for check in assessment.checks}
         if returned_conditions != expected_conditions:
             logger.error(
@@ -206,12 +232,9 @@ class EvidenceService:
                         "expected": sorted(expected_conditions),
                         "returned": sorted(returned_conditions),
                         "missing": sorted(expected_conditions - returned_conditions),
-                        "unexpected": sorted(
-                            returned_conditions - expected_conditions
-                        ),
+                        "unexpected": sorted(returned_conditions - expected_conditions),
                         "checks": [
-                            check.model_dump(mode="json")
-                            for check in assessment.checks
+                            check.model_dump(mode="json") for check in assessment.checks
                         ],
                     }
                 ),

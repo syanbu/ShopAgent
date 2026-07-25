@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shop_agent.models.product import Product
 
@@ -28,6 +28,8 @@ class ProductCandidate(BaseModel):
 
 
 class EvidenceCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     condition: str
     status: Literal["supported", "contradicted", "unknown"]
     evidence_ids: list[str] = Field(default_factory=list)
@@ -43,8 +45,10 @@ class EvidenceCheck(BaseModel):
 
 
 class EvidenceAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     product_id: str
-    checks: list[EvidenceCheck] = Field(default_factory=list)
+    checks: list[EvidenceCheck]
 
 
 class ValidatedCandidate(BaseModel):

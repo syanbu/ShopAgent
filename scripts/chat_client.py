@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain
+from time import monotonic
 from typing import Any, TextIO
 
 import httpx
@@ -89,6 +90,7 @@ def render_event(
     *,
     stdout: TextIO,
     stderr: TextIO,
+    elapsed_seconds: float | None = None,
 ) -> None:
     """Render one protocol event without buffering text deltas."""
     data = event.data
@@ -154,9 +156,14 @@ def render_event(
         )
     elif event.name == "message_end":
         _close_text(state, stdout)
+        elapsed = (
+            f" elapsed={max(elapsed_seconds, 0.0):.3f}s"
+            if elapsed_seconds is not None
+            else ""
+        )
         print(
             f"[结束] request_id={_safe_text(data.get('request_id', '-'))} "
-            f"status={_safe_text(data.get('status', '-'))}",
+            f"status={_safe_text(data.get('status', '-'))}{elapsed}",
             file=stdout,
         )
     else:
@@ -179,6 +186,11 @@ def send_message(
     state = DisplayState()
     saw_end = False
     completed = False
+    started_at = monotonic()
+
+    def elapsed_text() -> str:
+        return f"elapsed={max(monotonic() - started_at, 0.0):.3f}s"
+
     try:
         with client.stream(
             "POST",
@@ -191,20 +203,32 @@ def send_message(
             if "text/event-stream" not in content_type:
                 raise SseProtocolError("expected a text/event-stream response")
             for event in parse_sse(response.iter_lines()):
-                render_event(event, state, stdout=stdout, stderr=stderr)
+                elapsed_seconds = (
+                    monotonic() - started_at if event.name == "message_end" else None
+                )
+                render_event(
+                    event,
+                    state,
+                    stdout=stdout,
+                    stderr=stderr,
+                    elapsed_seconds=elapsed_seconds,
+                )
                 if event.name == "message_end":
                     saw_end = True
                     completed = event.data.get("status") == "completed"
         if not saw_end:
             raise SseProtocolError("stream ended before message_end")
     except httpx.HTTPStatusError as exc:
-        print(f"[客户端错误] HTTP {exc.response.status_code}", file=stderr)
+        print(
+            f"[客户端错误] HTTP {exc.response.status_code} {elapsed_text()}",
+            file=stderr,
+        )
         return False
     except httpx.RequestError as exc:
-        print(f"[客户端错误] {exc}", file=stderr)
+        print(f"[客户端错误] {exc} {elapsed_text()}", file=stderr)
         return False
     except SseProtocolError as exc:
-        print(f"[客户端错误] {exc}", file=stderr)
+        print(f"[客户端错误] {exc} {elapsed_text()}", file=stderr)
         return False
     return completed
 

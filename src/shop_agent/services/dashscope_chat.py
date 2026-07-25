@@ -4,7 +4,11 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import TypeVar
 
 from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import (
+    ChatCompletionMessageParam,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionToolParam,
+)
 from openai.types.shared_params import ResponseFormatJSONObject
 from pydantic import BaseModel, ValidationError
 
@@ -21,6 +25,7 @@ from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
 logger = logging.getLogger("uvicorn.error")
 StructuredResult = TypeVar("StructuredResult", bound=BaseModel)
 SkuTaxonomy = Mapping[str, Mapping[CanonicalSkuKey, Sequence[str]]]
+EVIDENCE_SUBMISSION_TOOL_NAME = "submit_evidence_assessment"
 _UNICODE_LINE_SEPARATOR_ESCAPES = str.maketrans(
     {
         "\u0085": "\\u0085",
@@ -43,6 +48,68 @@ def _single_line_json(value: object) -> str:
         separators=(",", ":"),
     )
     return encoded.translate(_UNICODE_LINE_SEPARATOR_ESCAPES)
+
+
+def _build_evidence_submission_tool(
+    product_id: str,
+    conditions: Sequence[EvidenceCondition],
+) -> ChatCompletionToolParam:
+    condition_ids = [condition.condition_id for condition in conditions]
+    condition_schema: dict[str, object] = {"type": "string"}
+    if condition_ids:
+        condition_schema["enum"] = condition_ids
+    return {
+        "type": "function",
+        "function": {
+            "name": EVIDENCE_SUBMISSION_TOOL_NAME,
+            "description": "Submit the complete evidence assessment for one product.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_id": {
+                        "type": "string",
+                        "enum": [product_id],
+                    },
+                    "checks": {
+                        "type": "array",
+                        "minItems": len(condition_ids),
+                        "maxItems": len(condition_ids),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "condition": condition_schema,
+                                "status": {
+                                    "type": "string",
+                                    "enum": [
+                                        "supported",
+                                        "contradicted",
+                                        "unknown",
+                                    ],
+                                },
+                                "evidence_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "conflicting_evidence_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": [
+                                "condition",
+                                "status",
+                                "evidence_ids",
+                                "conflicting_evidence_ids",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["product_id", "checks"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 class _DashScopeChatGateway:
@@ -98,6 +165,72 @@ class _DashScopeChatGateway:
                             f"Original output: {content}\n"
                             f"Validation error: {exc}\n"
                             "Return one corrected JSON object only."
+                        ),
+                    },
+                ]
+        raise AssertionError("unreachable")
+
+    async def _structured_tool_call(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        validator: Callable[[str], StructuredResult],
+        error_code: ErrorCode,
+        *,
+        tool: ChatCompletionToolParam,
+        tool_choice: ChatCompletionNamedToolChoiceParam,
+    ) -> StructuredResult:
+        current_messages = list(messages)
+        expected_tool_name = tool["function"]["name"]
+        for attempt in range(2):
+            try:
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=current_messages,
+                    tools=[tool],
+                    tool_choice=tool_choice,
+                    extra_body={"enable_thinking": False},
+                )
+            except Exception as exc:
+                logger.exception("DashScope structured call failed", exc_info=exc)
+                raise ServiceError(
+                    error_code,
+                    "upstream structured output error",
+                    retryable=True,
+                ) from exc
+
+            arguments = ""
+            try:
+                tool_calls = getattr(response.choices[0].message, "tool_calls", None)
+                if not tool_calls or len(tool_calls) != 1:
+                    raise ValueError(
+                        f"expected exactly one {expected_tool_name} tool call"
+                    )
+                tool_call = tool_calls[0]
+                if tool_call.function.name != expected_tool_name:
+                    raise ValueError(
+                        f"expected tool {expected_tool_name}, "
+                        f"returned={tool_call.function.name}"
+                    )
+                arguments = tool_call.function.arguments
+                return validator(arguments)
+            except (ValidationError, ValueError) as exc:
+                if attempt == 1:
+                    raise ServiceError(
+                        error_code,
+                        "invalid structured output",
+                        retryable=True,
+                    ) from exc
+                current_messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            f"The previous {expected_tool_name} call failed "
+                            "validation. "
+                            f"Previous arguments: {arguments or '<missing>'}\n"
+                            f"Validation error: {exc}\n"
+                            f"Call {expected_tool_name} once with corrected "
+                            "arguments."
                         ),
                     },
                 ]
@@ -351,9 +484,7 @@ class DashScopeIntentParser(_DashScopeChatGateway):
             return parsed
         if parsed.category is None or parsed.sub_category is None:
             if parsed.constraints.sku_constraints:
-                raise ValueError(
-                    "SKU constraints require category and sub_category"
-                )
+                raise ValueError("SKU constraints require category and sub_category")
             return parsed
         pair = f"{parsed.category}/{parsed.sub_category}"
         allowed = self._sku_taxonomy.get(pair, {})
@@ -424,8 +555,7 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
                 {
                     "product_id": product_id,
                     "conditions": [
-                        condition.model_dump(mode="json")
-                        for condition in conditions
+                        condition.model_dump(mode="json") for condition in conditions
                     ],
                     "evidence": [
                         {
@@ -437,6 +567,11 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
                 }
             ),
         )
+        tool = _build_evidence_submission_tool(product_id, conditions)
+        tool_choice: ChatCompletionNamedToolChoiceParam = {
+            "type": "function",
+            "function": {"name": EVIDENCE_SUBMISSION_TOOL_NAME},
+        }
         messages: list[ChatCompletionMessageParam] = [
             {
                 "role": "system",
@@ -451,8 +586,7 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
                     "EvidenceCheck.condition. supported and contradicted require "
                     "decisive evidence_ids; conflicting_evidence_ids contains only "
                     "losing-side evidence. unknown means the evidence is insufficient; "
-                    "contradicted means the evidence explicitly violates the condition. "
-                    "Return JSON matching EvidenceAssessment."
+                    "contradicted means the evidence explicitly violates the condition."
                 ),
             },
             {
@@ -478,28 +612,24 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
             },
         ]
 
-        def validate_assessment(content: str) -> EvidenceAssessment:
+        def validate_assessment(arguments: str) -> EvidenceAssessment:
             logger.info(
                 "evidence_model_raw_output %s",
                 _single_line_json(
                     {
                         "product_id": product_id,
-                        "content": content,
+                        "arguments": arguments,
                     }
                 ),
             )
-            assessment = EvidenceAssessment.model_validate_json(content)
-            returned_condition_ids = [
-                check.condition for check in assessment.checks
-            ]
+            assessment = EvidenceAssessment.model_validate_json(arguments)
+            returned_condition_ids = [check.condition for check in assessment.checks]
             if len(returned_condition_ids) != len(set(returned_condition_ids)):
                 raise ValueError(
                     "each evidence condition ID must be returned exactly once; "
                     f"returned={returned_condition_ids}"
                 )
-            expected_conditions = {
-                condition.condition_id for condition in conditions
-            }
+            expected_conditions = {condition.condition_id for condition in conditions}
             returned_conditions = set(returned_condition_ids)
             if returned_conditions != expected_conditions:
                 raise ValueError(
@@ -509,10 +639,12 @@ class DashScopeEvidenceMapper(_DashScopeChatGateway):
                 )
             return assessment
 
-        return await self._structured_call(
+        return await self._structured_tool_call(
             messages,
             validate_assessment,
             "EVIDENCE_PARSE_FAILED",
+            tool=tool,
+            tool_choice=tool_choice,
         )
 
 

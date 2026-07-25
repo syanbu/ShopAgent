@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -58,6 +59,100 @@ class FakeEvidenceMapper:
     ) -> EvidenceAssessment:
         self.calls.append((product_id, list(conditions), list(evidence)))
         return self.assessments[product_id]
+
+
+class ConcurrencyTrackingMapper:
+    def __init__(self) -> None:
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def map_conditions(
+        self,
+        product_id: str,
+        conditions: Sequence[EvidenceCondition],
+        evidence: Sequence[EvidenceChunk],
+    ) -> EvidenceAssessment:
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            await asyncio.sleep(0)
+        finally:
+            self.active_calls -= 1
+        return EvidenceAssessment(
+            product_id=product_id,
+            checks=[
+                EvidenceCheck(
+                    condition=condition.condition_id,
+                    status="unknown",
+                )
+                for condition in conditions
+            ],
+        )
+
+
+class ReverseCompletionMapper:
+    def __init__(self) -> None:
+        self.completion_order: list[str] = []
+
+    async def map_conditions(
+        self,
+        product_id: str,
+        conditions: Sequence[EvidenceCondition],
+        evidence: Sequence[EvidenceChunk],
+    ) -> EvidenceAssessment:
+        for _ in range(10 - int(product_id.removeprefix("p"))):
+            await asyncio.sleep(0)
+        self.completion_order.append(product_id)
+        return EvidenceAssessment(
+            product_id=product_id,
+            checks=[
+                EvidenceCheck(
+                    condition=condition.condition_id,
+                    status="unknown",
+                )
+                for condition in conditions
+            ],
+        )
+
+
+class FailingConcurrentMapper:
+    def __init__(self, error: ServiceError) -> None:
+        self.error = error
+        self.release = asyncio.Event()
+        self.started: set[str] = set()
+        self.cancelled: set[str] = set()
+        self.siblings_finished = asyncio.Event()
+        self._finished_siblings = 0
+
+    async def map_conditions(
+        self,
+        product_id: str,
+        conditions: Sequence[EvidenceCondition],
+        evidence: Sequence[EvidenceChunk],
+    ) -> EvidenceAssessment:
+        self.started.add(product_id)
+        if product_id == "p0":
+            await asyncio.sleep(0)
+            raise self.error
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.add(product_id)
+            raise
+        finally:
+            self._finished_siblings += 1
+            if self._finished_siblings == 4:
+                self.siblings_finished.set()
+        return EvidenceAssessment(
+            product_id=product_id,
+            checks=[
+                EvidenceCheck(
+                    condition=condition.condition_id,
+                    status="unknown",
+                )
+                for condition in conditions
+            ],
+        )
 
 
 def _product(
@@ -224,9 +319,7 @@ async def test_contradicted_feature_rejects_candidate() -> None:
 @pytest.mark.asyncio
 async def test_missing_evidence_condition_is_parse_failure() -> None:
     product = _product("p1")
-    mapper = FakeEvidenceMapper(
-        {"p1": EvidenceAssessment(product_id="p1", checks=[])}
-    )
+    mapper = FakeEvidenceMapper({"p1": EvidenceAssessment(product_id="p1", checks=[])})
     service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
 
     with pytest.raises(
@@ -237,6 +330,83 @@ async def test_missing_evidence_condition_is_parse_failure() -> None:
             [_candidate(product, 0.8)],
             SearchConstraints(required_features=["防水"]),
         )
+
+
+def test_evidence_check_rejects_fields_outside_tool_schema() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        EvidenceCheck.model_validate(
+            {
+                "condition": "excluded:曲面屏",
+                "status": "unknown",
+                "supported": False,
+            }
+        )
+
+
+def test_evidence_assessment_requires_checks() -> None:
+    with pytest.raises(ValidationError, match="Field required"):
+        EvidenceAssessment.model_validate({"product_id": "p1"})
+
+
+@pytest.mark.asyncio
+async def test_validate_candidates_limits_evidence_concurrency_to_five() -> None:
+    products = [_product(f"p{index}") for index in range(10)]
+    mapper = ConcurrencyTrackingMapper()
+    service = EvidenceService(catalog=_catalog(products), mapper=mapper)
+
+    await service.validate_candidates(
+        [
+            _candidate(product, 1.0 - index / 100)
+            for index, product in enumerate(products)
+        ],
+        SearchConstraints(required_features=["防水"]),
+    )
+
+    assert mapper.max_active_calls == 5
+
+
+@pytest.mark.asyncio
+async def test_validate_candidates_preserves_input_order_when_calls_finish_out_of_order() -> (
+    None
+):
+    products = [_product(f"p{index}") for index in range(10)]
+    mapper = ReverseCompletionMapper()
+    service = EvidenceService(catalog=_catalog(products), mapper=mapper)
+
+    validated = await service.validate_candidates(
+        [_candidate(product, 0.5) for product in products],
+        SearchConstraints(required_features=["防水"]),
+    )
+
+    input_order = [product.product_id for product in products]
+    assert mapper.completion_order != input_order
+    assert [item.candidate.product.product_id for item in validated] == input_order
+
+
+@pytest.mark.asyncio
+async def test_validate_candidates_cancels_siblings_and_preserves_error() -> None:
+    products = [_product(f"p{index}") for index in range(5)]
+    error = ServiceError(
+        "EVIDENCE_PARSE_FAILED",
+        "invalid evidence response",
+        retryable=True,
+    )
+    mapper = FailingConcurrentMapper(error)
+    service = EvidenceService(catalog=_catalog(products), mapper=mapper)
+
+    try:
+        with pytest.raises(ServiceError) as caught:
+            await service.validate_candidates(
+                [_candidate(product, 0.5) for product in products],
+                SearchConstraints(required_features=["防水"]),
+            )
+
+        assert caught.value is error
+        assert mapper.started == {"p0", "p1", "p2", "p3", "p4"}
+        assert mapper.cancelled == {"p1", "p2", "p3", "p4"}
+    finally:
+        mapper.release.set()
+        await asyncio.wait_for(mapper.siblings_finished.wait(), timeout=1)
 
 
 @pytest.mark.asyncio

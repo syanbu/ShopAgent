@@ -129,7 +129,9 @@ def test_render_event_strips_terminal_control_characters() -> None:
     assert "安全]52;c;secret文本" in output
 
 
-def test_send_message_posts_payload_and_streams_events() -> None:
+def test_send_message_posts_payload_and_streams_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == "http://test/api/v1/chat/stream"
         assert request.headers["accept"] == "text/event-stream"
@@ -148,6 +150,13 @@ def test_send_message_posts_payload_and_streams_events() -> None:
             ),
         )
 
+    clock_values = iter((10.0, 12.5))
+    monkeypatch.setattr(
+        chat_client,
+        "monotonic",
+        lambda: next(clock_values),
+        raising=False,
+    )
     stdout = StringIO()
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         completed = send_message(
@@ -161,10 +170,18 @@ def test_send_message_posts_payload_and_streams_events() -> None:
 
     assert completed
     assert "助手> 推荐结果" in stdout.getvalue()
+    assert "[结束] request_id=r1 status=completed elapsed=2.500s" in stdout.getvalue()
 
 
-def test_send_message_reports_http_failure() -> None:
+def test_send_message_reports_http_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(503))
+    clock_values = iter((20.0, 20.125))
+    monkeypatch.setattr(
+        chat_client,
+        "monotonic",
+        lambda: next(clock_values),
+        raising=False,
+    )
     stderr = StringIO()
 
     with httpx.Client(transport=transport) as client:
@@ -178,7 +195,7 @@ def test_send_message_reports_http_failure() -> None:
         )
 
     assert not completed
-    assert "[客户端错误] HTTP 503" in stderr.getvalue()
+    assert "[客户端错误] HTTP 503 elapsed=0.125s" in stderr.getvalue()
 
 
 def test_send_message_rejects_stream_without_end_event() -> None:

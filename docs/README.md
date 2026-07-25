@@ -17,7 +17,7 @@
 
 | 功能 | 状态 | 功能文档 | 代码入口 |
 |---|---|---|---|
-| 单轮文本商品推荐工作流（含性价比价格编译） | 已完成 | [features/text-shopping-workflow.md](features/text-shopping-workflow.md) | `src/shop_agent/models/`, `src/shop_agent/catalog.py`, `src/shop_agent/chunking.py`, `src/shop_agent/services/query_compiler.py`, `src/shop_agent/workflow/`, `src/shop_agent/api/`, `src/shop_agent/cli/index_products.py`, `tests/live/test_live_shopping_flow.py`, `compose.yaml` |
+| 单轮文本商品推荐工作流（含性价比价格编译） | 已完成 | [features/text-shopping-workflow.md](features/text-shopping-workflow.md) | `src/shop_agent/models/`, `src/shop_agent/catalog.py`, `src/shop_agent/chunking.py`, `src/shop_agent/services/query_compiler.py`, `src/shop_agent/workflow/`, `src/shop_agent/api/`, `src/shop_agent/cli/index_products.py`, `scripts/chat_client.py`, `tests/live/test_live_shopping_flow.py`, `compose.yaml` |
 | 跨品类商品约束与 SKU 匹配 | 开发中 | [features/cross-category-shopping-constraints.md](features/cross-category-shopping-constraints.md) | `src/shop_agent/models/query.py`、`src/shop_agent/sku_attributes.py`、`src/shop_agent/catalog.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/evidence.py`、`src/shop_agent/workflow/` |
 
 ## 更新规则

@@ -130,7 +130,10 @@ class FakeEvidenceService:
         return [
             ValidatedCandidate(
                 candidate=candidate,
-                assessment=EvidenceAssessment(product_id=candidate.product.product_id),
+                assessment=EvidenceAssessment(
+                    product_id=candidate.product.product_id,
+                    checks=[],
+                ),
                 eligible=self.eligible,
                 rejection_reasons=[]
                 if self.eligible
