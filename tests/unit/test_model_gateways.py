@@ -1,4 +1,5 @@
 import json
+import logging
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
@@ -389,6 +390,7 @@ async def test_intent_parser_drops_mismatched_catalog_taxonomy_pair(
 @pytest.mark.asyncio
 async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
     settings: Settings,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     create = AsyncMock(
         return_value=_chat_response(
@@ -419,18 +421,19 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
         ),
     ]
 
-    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
-        assessment = await DashScopeEvidenceMapper(settings).map_conditions(
-            "p1",
-            [
-                EvidenceCondition(
-                    condition_id="required:防水",
-                    kind="required_feature",
-                    expression="商品具备：防水",
-                )
-            ],
-            evidence,
-        )
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+            assessment = await DashScopeEvidenceMapper(settings).map_conditions(
+                "p1",
+                [
+                    EvidenceCondition(
+                        condition_id="required:防水",
+                        kind="required_feature",
+                        expression="商品具备：防水",
+                    )
+                ],
+                evidence,
+            )
 
     assert create.await_args is not None
     messages = create.await_args.kwargs["messages"]
@@ -448,6 +451,106 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
         value in prompt for value in ("faq-1", "official_faq", "官方说明支持防水")
     )
     assert assessment.checks[0].conflicting_evidence_ids == ["review-1"]
+    input_message = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("evidence_mapping_input ")
+    )
+    input_payload = json.loads(input_message.removeprefix("evidence_mapping_input "))
+    assert input_payload == {
+        "product_id": "p1",
+        "conditions": [
+            {
+                "condition_id": "required:防水",
+                "kind": "required_feature",
+                "expression": "商品具备：防水",
+                "numeric_constraint": None,
+            }
+        ],
+        "evidence": [
+            {"chunk_id": "faq-1", "chunk_type": "official_faq"},
+            {"chunk_id": "review-1", "chunk_type": "user_review"},
+        ],
+    }
+    assert "官方说明支持防水" not in input_message
+    assert "用户称不防水" not in input_message
+
+
+@pytest.mark.asyncio
+async def test_evidence_mapper_logs_raw_model_output_as_single_line_json(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw_content = '{\n  "product_id": "p1",\n  "checks": []\n}'
+    create = AsyncMock(return_value=_chat_response(raw_content))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+            await DashScopeEvidenceMapper(settings).map_conditions("p1", [], [])
+
+    raw_message = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("evidence_model_raw_output ")
+    )
+    assert "\n" not in raw_message
+    assert json.loads(raw_message.removeprefix("evidence_model_raw_output ")) == {
+        "product_id": "p1",
+        "content": raw_content,
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_content",
+    [
+        '{"product_id":"p1","checks":[]}',
+        (
+            '{"product_id":"p1","checks":['
+            '{"condition":"excluded:曲面屏","status":"unknown"},'
+            '{"condition":"excluded:曲面屏","status":"unknown"}]}'
+        ),
+    ],
+    ids=["missing", "duplicate"],
+)
+@pytest.mark.asyncio
+async def test_evidence_mapper_retries_until_each_condition_id_is_returned_once(
+    settings: Settings,
+    invalid_content: str,
+) -> None:
+    corrected_content = (
+        '{"product_id":"p1","checks":['
+        '{"condition":"excluded:曲面屏","status":"unknown"}]}'
+    )
+    create = AsyncMock(
+        side_effect=[
+            _chat_response(invalid_content),
+            _chat_response(corrected_content),
+        ]
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        assessment = await DashScopeEvidenceMapper(settings).map_conditions(
+            "p1",
+            [
+                EvidenceCondition(
+                    condition_id="excluded:曲面屏",
+                    kind="excluded_feature",
+                    expression="商品不具备：曲面屏",
+                )
+            ],
+            [],
+        )
+
+    assert create.await_count == 2
+    assert [check.condition for check in assessment.checks] == ["excluded:曲面屏"]
+    correction = create.await_args_list[1].kwargs["messages"][-1]["content"]
+    assert "excluded:曲面屏" in correction
 
 
 @pytest.mark.asyncio

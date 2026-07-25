@@ -302,16 +302,15 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 ### 已知问题
 
 - 复合商品短语同时包含多个合法子类词时，意图模型缺少稳定的中心词选择规则。例如“防晒精华”当前可能被解析为 `sub_category=防晒`、`required_features=["精华"]`，而不是以“精华”为商品子类。
-- 证据模型返回的 `checks[].condition` 未完整覆盖请求条件时，精确覆盖校验发生在结构化模型调用的自动纠错范围之外；单个候选的条件 ID 缺失或改写会导致整个 SSE 请求以 `EVIDENCE_PARSE_FAILED` 结束。
 
-以上问题尚未修复，因此本功能保持“开发中”状态；当前提交是可验证的阶段性检查点。
+以上问题尚未修复，因此本功能保持“开发中”状态；当前实现是可验证的阶段性检查点。
 
 已实现代码入口：
 
 - `src/shop_agent/models/query.py`：分层约束、SKU 约束和数值约束模型。
 - `src/shop_agent/sku_attributes.py`：59种原始 key 的规范映射、taxonomy 和数值单位归一化。
 - `src/shop_agent/catalog.py`：规范属性目录、SKU 规范化视图和同一 SKU 联合匹配。
-- `src/shop_agent/services/dashscope_chat.py`：向意图模型提供当前子类允许的规范 key 与值。
+- `src/shop_agent/services/dashscope_chat.py`：向意图模型提供当前子类允许的规范 key 与值，并在证据结构化调用的自动纠错范围内校验 condition ID 完整覆盖。
 - `src/shop_agent/services/evidence.py`：执行结构化硬过滤和语义三态候选准入。
 - `src/shop_agent/workflow/`：在检索、证据验证和候选决策之间传递新约束与匹配 SKU。
 
@@ -330,12 +329,13 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 - `display_price` 来自过滤后的 `matched_skus`，不使用其他规格的最低价。
 - `supported` 候选保留，`unknown` 候选也保留，`contradicted` 候选淘汰。
 - `supported` 和 `contradicted` 缺少决定性 `evidence_ids` 时，证据响应校验失败，不能据此保留或淘汰商品。
+- 证据模型遗漏、改写或重复 condition ID 时，第一次响应校验失败并进入现有的一次自动纠错；正常响应仍只调用一次证据模型。
 - 商品 JSON 没有证据时，模型不能将语义条件判定为 `supported`。
 - 原有无 SKU 属性条件的价格检索行为保持兼容。
 
 验证命令与结果：
 
-- `uv run pytest tests/unit tests/integration -q -rs`：166 passed；本次本地 Qdrant 集成测试实际执行并通过。
+- `uv run pytest tests/unit tests/integration -q -rs`：170 passed；本次本地 Qdrant 集成测试实际执行并通过。
 - `uv run ruff check .`：通过。
 - `uv run mypy src`：33个源文件通过。
 - 真实数据专项测试：3 passed，确认4个一级类目、37个子类、100个商品及全部59种原始 SKU key 均可加载和规范化。
@@ -348,3 +348,4 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 | 2026-07-25 | 完成约束模型、taxonomy、同一 SKU 匹配和 unknown 准入 | 实现已确认设计，并记录确定性测试与未通过的外部 Qdrant 验证边界 |
 | 2026-07-25 | 要求 contradicted 携带决定性证据 | 防止证据模型在没有原始商品证据时淘汰候选，并明确冲突证据不能替代决定性证据 |
 | 2026-07-25 | 状态调整为开发中并记录真实请求缺陷 | 复合子类短语仍可能误解析，证据条件覆盖错误仍会终止整个流；同时更新本地 Qdrant 已实际通过的验证结果 |
+| 2026-07-25 | 将证据 condition ID 覆盖校验纳入结构化调用纠错 | 缺失、改写或重复 ID 时允许模型纠正一次，避免首次可纠正输出直接终止 SSE |

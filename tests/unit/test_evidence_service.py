@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Sequence
 from pathlib import Path
@@ -236,6 +237,53 @@ async def test_missing_evidence_condition_is_parse_failure() -> None:
             [_candidate(product, 0.8)],
             SearchConstraints(required_features=["防水"]),
         )
+
+
+@pytest.mark.asyncio
+async def test_evidence_condition_mismatch_logs_exact_set_difference(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    product = _product("p1")
+    mapper = FakeEvidenceMapper(
+        {
+            "p1": EvidenceAssessment(
+                product_id="p1",
+                checks=[EvidenceCheck(condition="防水", status="unknown")],
+            )
+        }
+    )
+    service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
+
+    with caplog.at_level(logging.ERROR, logger="shop_agent.services.evidence"):
+        with pytest.raises(
+            ServiceError,
+            match="evidence conditions do not match request",
+        ):
+            await service.validate_candidates(
+                [_candidate(product, 0.8)],
+                SearchConstraints(required_features=["防水"]),
+            )
+
+    message = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("evidence_condition_mismatch ")
+    )
+    assert json.loads(message.removeprefix("evidence_condition_mismatch ")) == {
+        "product_id": "p1",
+        "expected": ["required:防水"],
+        "returned": ["防水"],
+        "missing": ["required:防水"],
+        "unexpected": ["防水"],
+        "checks": [
+            {
+                "condition": "防水",
+                "status": "unknown",
+                "evidence_ids": [],
+                "conflicting_evidence_ids": [],
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio

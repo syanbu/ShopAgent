@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Sequence
 
@@ -18,6 +19,22 @@ from shop_agent.services.ports import EvidenceMapper
 
 
 logger = logging.getLogger(__name__)
+_UNICODE_LINE_SEPARATOR_ESCAPES = str.maketrans(
+    {
+        "\u0085": "\\u0085",
+        "\u2028": "\\u2028",
+        "\u2029": "\\u2029",
+    }
+)
+
+
+def _single_line_json(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return encoded.translate(_UNICODE_LINE_SEPARATOR_ESCAPES)
 
 
 def semantic_conditions_allow_candidate(assessment: EvidenceAssessment) -> bool:
@@ -181,6 +198,24 @@ class EvidenceService:
         }
         returned_conditions = {check.condition for check in assessment.checks}
         if returned_conditions != expected_conditions:
+            logger.error(
+                "evidence_condition_mismatch %s",
+                _single_line_json(
+                    {
+                        "product_id": candidate.product.product_id,
+                        "expected": sorted(expected_conditions),
+                        "returned": sorted(returned_conditions),
+                        "missing": sorted(expected_conditions - returned_conditions),
+                        "unexpected": sorted(
+                            returned_conditions - expected_conditions
+                        ),
+                        "checks": [
+                            check.model_dump(mode="json")
+                            for check in assessment.checks
+                        ],
+                    }
+                ),
+            )
             raise ServiceError(
                 "EVIDENCE_PARSE_FAILED",
                 "evidence conditions do not match request",
