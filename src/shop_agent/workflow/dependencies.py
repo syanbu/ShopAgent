@@ -7,16 +7,25 @@ from shop_agent.catalog import ProductCatalog
 from shop_agent.config import Settings
 from shop_agent.models.query import ParsedIntent, SearchConstraints
 from shop_agent.models.retrieval import (
+    EvidenceChunk,
     ProductCandidate,
     RetrievedChunk,
     SelectedProduct,
     ValidatedCandidate,
 )
-from shop_agent.services.ports import IntentParser, ResponseGenerator
+from shop_agent.services.conversation_repository import ConversationRepository
+from shop_agent.services.ports import ResponseGenerator, TurnQueryParser
 
 
 class RetrievalOperations(Protocol):
-    async def retrieve_chunks(self, intent: ParsedIntent) -> list[RetrievedChunk]: ...
+    async def retrieve_chunks(
+        self,
+        intent: ParsedIntent,
+        *,
+        excluded_product_ids: Sequence[str] = (),
+    ) -> list[RetrievedChunk]: ...
+
+    async def fetch_product_chunks(self, product_id: str) -> list[EvidenceChunk]: ...
 
     def aggregate_products(
         self, chunks: Sequence[RetrievedChunk]
@@ -52,7 +61,8 @@ def _new_id() -> str:
 
 @dataclass(frozen=True, slots=True)
 class WorkflowDependencies:
-    intent_parser: IntentParser
+    turn_query_parser: TurnQueryParser
+    conversation_repository: ConversationRepository
     retrieval_service: RetrievalOperations
     evidence_service: EvidenceOperations
     response_generator: ResponseGenerator

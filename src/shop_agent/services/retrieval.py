@@ -6,7 +6,7 @@ from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
 from shop_agent.models.product import Product
 from shop_agent.models.query import ParsedIntent, SearchConstraints
-from shop_agent.models.retrieval import ProductCandidate, RetrievedChunk
+from shop_agent.models.retrieval import EvidenceChunk, ProductCandidate, RetrievedChunk
 from shop_agent.services.ports import Embedder, Reranker
 
 
@@ -18,7 +18,11 @@ class RetrievalStore(Protocol):
         category: str | None,
         sub_category: str | None,
         constraints: SearchConstraints,
+        excluded_product_ids: Sequence[str] = (),
     ) -> list[RetrievedChunk]:
+        raise NotImplementedError
+
+    async def fetch_product_chunks(self, product_id: str) -> list[EvidenceChunk]:
         raise NotImplementedError
 
 
@@ -38,7 +42,12 @@ class RetrievalService:
         self._store = store
         self._reranker = reranker
 
-    async def retrieve_chunks(self, intent: ParsedIntent) -> list[RetrievedChunk]:
+    async def retrieve_chunks(
+        self,
+        intent: ParsedIntent,
+        *,
+        excluded_product_ids: Sequence[str] = (),
+    ) -> list[RetrievedChunk]:
         if intent.intent != "product_search" or intent.retrieval_query is None:
             raise ServiceError(
                 "RETRIEVAL_UNAVAILABLE",
@@ -51,7 +60,13 @@ class RetrievalService:
             category=intent.category,
             sub_category=intent.sub_category,
             constraints=intent.constraints,
+            excluded_product_ids=excluded_product_ids,
         )
+
+    async def fetch_product_chunks(self, product_id: str) -> list[EvidenceChunk]:
+        if not isinstance(product_id, str) or not product_id.strip():
+            raise ValueError("product_id must be a non-empty string")
+        return await self._store.fetch_product_chunks(product_id.strip())
 
     def aggregate_products(
         self, chunks: Sequence[RetrievedChunk]

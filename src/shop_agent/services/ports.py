@@ -1,8 +1,27 @@
 from collections.abc import AsyncIterator, Sequence
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict, Field
+
+from shop_agent.models.conversation import PendingClarification, QuerySnapshot
 from shop_agent.models.query import EvidenceCondition, ParsedIntent
 from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
+from shop_agent.models.turn_query import TurnCandidateSummary, TurnQuery
+
+
+class TurnContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query_snapshot: QuerySnapshot | None = None
+    recent_candidates: list[TurnCandidateSummary] = Field(default_factory=list)
+    focused_product_id: str | None = None
+    pending_clarification: PendingClarification | None = None
+
+
+@runtime_checkable
+class TurnQueryParser(Protocol):
+    async def parse(self, message: str, context: TurnContext) -> TurnQuery:
+        raise NotImplementedError
 
 
 class IntentParser(Protocol):

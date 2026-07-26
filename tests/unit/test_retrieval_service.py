@@ -8,7 +8,7 @@ from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
 from shop_agent.models.product import Product
 from shop_agent.models.query import ParsedIntent, SearchConstraints
-from shop_agent.models.retrieval import RetrievedChunk
+from shop_agent.models.retrieval import EvidenceChunk, RetrievedChunk
 from shop_agent.services.retrieval import RetrievalService
 
 
@@ -25,9 +25,16 @@ class FakeEmbedder:
 
 
 class FakeStore:
-    def __init__(self, chunks: list[RetrievedChunk]) -> None:
+    def __init__(
+        self,
+        chunks: list[RetrievedChunk],
+        *,
+        product_chunks: list[EvidenceChunk] | None = None,
+    ) -> None:
         self.chunks = chunks
+        self.product_chunks = product_chunks or []
         self.calls: list[dict[str, object]] = []
+        self.product_calls: list[str] = []
 
     async def search(
         self,
@@ -36,6 +43,7 @@ class FakeStore:
         category: str | None,
         sub_category: str | None,
         constraints: SearchConstraints,
+        excluded_product_ids: Sequence[str] = (),
     ) -> list[RetrievedChunk]:
         self.calls.append(
             {
@@ -43,9 +51,14 @@ class FakeStore:
                 "category": category,
                 "sub_category": sub_category,
                 "constraints": constraints,
+                "excluded_product_ids": excluded_product_ids,
             }
         )
         return self.chunks
+
+    async def fetch_product_chunks(self, product_id: str) -> list[EvidenceChunk]:
+        self.product_calls.append(product_id)
+        return self.product_chunks
 
 
 class FakeReranker:
@@ -126,7 +139,10 @@ async def test_retrieve_chunks_embeds_query_and_forwards_structured_filters(
         settings=_settings(sample_dataset_root), catalog=catalog, chunks=[]
     )
 
-    chunks = await service.retrieve_chunks(_intent())
+    excluded_product_ids = ["p1", "P1", "p1"]
+    chunks = await service.retrieve_chunks(
+        _intent(), excluded_product_ids=excluded_product_ids
+    )
 
     assert chunks == []
     assert embedder.queries == ["适合通勤的蓝牙耳机"]
@@ -136,8 +152,60 @@ async def test_retrieve_chunks_embeds_query_and_forwards_structured_filters(
             "category": "数码电子",
             "sub_category": "蓝牙耳机",
             "constraints": SearchConstraints(max_price=500),
+            "excluded_product_ids": excluded_product_ids,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_product_chunks_delegates_without_embedding_or_reranking(
+    sample_dataset_root: Path,
+) -> None:
+    catalog = ProductCatalog.load(sample_dataset_root)
+    expected = [
+        EvidenceChunk(
+            chunk_id="p_digital_001:summary",
+            point_id="00000000-0000-0000-0000-000000000001",
+            product_id="p_digital_001",
+            chunk_type="product_summary",
+            text="商品资料",
+            source_path="data/p_digital_001.json",
+        )
+    ]
+    embedder = FakeEmbedder()
+    store = FakeStore([], product_chunks=expected)
+    reranker = FakeReranker([])
+    service = RetrievalService(
+        settings=_settings(sample_dataset_root),
+        catalog=catalog,
+        embedder=embedder,
+        store=store,
+        reranker=reranker,
+    )
+
+    results = await service.fetch_product_chunks("p_digital_001")
+
+    assert results == expected
+    assert store.product_calls == ["p_digital_001"]
+    assert embedder.queries == []
+    assert reranker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_product_chunks_rejects_blank_id_before_dependencies(
+    sample_dataset_root: Path,
+) -> None:
+    catalog = ProductCatalog.load(sample_dataset_root)
+    service, embedder, store, reranker = _service(
+        settings=_settings(sample_dataset_root), catalog=catalog, chunks=[]
+    )
+
+    with pytest.raises(ValueError, match="product_id must be a non-empty string"):
+        await service.fetch_product_chunks("  ")
+
+    assert store.product_calls == []
+    assert embedder.queries == []
+    assert reranker.calls == []
 
 
 def test_retrieval_groups_chunks_and_keeps_top_five_per_product(

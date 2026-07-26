@@ -70,6 +70,22 @@ async def test_qdrant_store_upserts_and_filters_by_brand_and_price() -> None:
                     "max_sku_price": 899.0,
                 },
             ),
+            models.PointStruct(
+                id="00000000-0000-0000-0000-000000000003",
+                vector=[0.95, 0.05] + [0.0] * 1022,
+                payload={
+                    "chunk_id": "p1:review:0",
+                    "product_id": "p1",
+                    "chunk_type": "user_review",
+                    "text": "品牌A耳机评价",
+                    "source_path": "p1.json",
+                    "category": "数码电子",
+                    "sub_category": "蓝牙耳机",
+                    "brand": "品牌A",
+                    "min_sku_price": 399.0,
+                    "max_sku_price": 599.0,
+                },
+            ),
         ]
         await store.upsert(points)
 
@@ -80,7 +96,16 @@ async def test_qdrant_store_upserts_and_filters_by_brand_and_price() -> None:
             constraints=SearchConstraints(include_brands=["品牌A"], max_price=500),
         )
 
-        assert [result.product_id for result in results] == ["p1"]
+        assert results
+        assert {result.product_id for result in results} == {"p1"}
+
+        product_chunks = await store.fetch_product_chunks("p1")
+
+        assert [chunk.chunk_id for chunk in product_chunks] == [
+            "p1:summary",
+            "p1:review:0",
+        ]
+        assert all(not hasattr(chunk, "score") for chunk in product_chunks)
     finally:
         await cleanup_qdrant_test_collection(
             client,

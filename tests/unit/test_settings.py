@@ -17,6 +17,12 @@ def test_settings_resolve_dataset_from_project_root(tmp_path: Path) -> None:
     assert settings.qdrant_collection == "product_text_chunks_v1"
 
 
+def test_settings_default_conversation_database_path() -> None:
+    settings = Settings(dashscope_api_key="test")
+
+    assert settings.conversation_db_path == Path(".data/conversations.sqlite3")
+
+
 def test_project_does_not_declare_an_unimplemented_console_script() -> None:
     pyproject_path = Path(__file__).parents[2] / "pyproject.toml"
     with pyproject_path.open("rb") as pyproject_file:

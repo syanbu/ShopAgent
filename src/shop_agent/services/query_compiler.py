@@ -11,7 +11,7 @@ CLARIFICATION_MESSAGE = "请明确想购买的商品类型，例如手机、T恤
 VALUE_PRICE_MULTIPLIER = 1.2
 
 
-def compile_query(
+def compile_effective_query(
     intent: ParsedIntent,
     catalog: ProductCatalog,
 ) -> QueryCompilationResult:

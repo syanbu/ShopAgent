@@ -1,19 +1,40 @@
 from typing import Literal, TypedDict
 
 from shop_agent.errors import ErrorCode
+from shop_agent.models.conversation import (
+    ConversationRecord,
+    ConversationState,
+    QuerySnapshot,
+)
 from shop_agent.models.query import ParsedIntent, PriceCompilationReference, SearchConstraints
 from shop_agent.models.retrieval import (
+    EvidenceChunk,
     ProductCandidate,
     RetrievedChunk,
     SelectedProduct,
     ValidatedCandidate,
 )
+from shop_agent.models.turn_query import TurnQuery
 
 
 class ShoppingState(TypedDict, total=False):
     request_id: str
     conversation_id: str
     user_message: str
+    conversation_record: ConversationRecord
+    conversation_state: ConversationState
+    turn_query: TurnQuery
+    resolved_product_id: str
+    resolved_brand: str
+    query_snapshot: QuerySnapshot
+    search_intent: Literal[
+        "new_search",
+        "refine_search",
+        "switch_category",
+        "more_results",
+    ]
+    pending_expected_version: int | None
+    product_knowledge: list[EvidenceChunk]
     parsed_intent: ParsedIntent
     effective_constraints: SearchConstraints
     price_reference: PriceCompilationReference

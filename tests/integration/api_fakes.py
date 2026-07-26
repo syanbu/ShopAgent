@@ -1,10 +1,32 @@
 import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
+from shop_agent.api.dependencies import ApiDependencies
+from shop_agent.catalog import ProductCatalog
+from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
+from shop_agent.models.conversation import ConversationRecord, ConversationState
+from shop_agent.models.product import Product
+from shop_agent.models.query import ParsedIntent, SearchConstraints
+from shop_agent.models.retrieval import (
+    EvidenceAssessment,
+    ProductCandidate,
+    RetrievedChunk,
+    SelectedProduct,
+    ValidatedCandidate,
+)
 from shop_agent.models.state import ShoppingState
+from shop_agent.models.turn_query import TurnQuery
+from shop_agent.services.conversation_repository import (
+    ConversationRepository,
+    SqliteConversationRepository,
+)
+from shop_agent.services.ports import TurnContext, TurnQueryParser
+from shop_agent.workflow.dependencies import WorkflowDependencies
+from shop_agent.workflow.graph import build_graph
 
 
 class FakeGraph:
@@ -84,3 +106,264 @@ def product_event(product_id: str = "p1", *, price: float = 400) -> dict[str, An
             "image_url": f"http://test/api/v1/products/{product_id}/image",
         },
     }
+
+
+class SequencedTurnQueryParser:
+    def __init__(self, turns: Sequence[TurnQuery]) -> None:
+        self._turns = iter(turns)
+        self.calls: list[str] = []
+        self.contexts: list[TurnContext] = []
+
+    async def parse(self, message: str, context: TurnContext) -> TurnQuery:
+        self.calls.append(message)
+        self.contexts.append(context)
+        return next(self._turns)
+
+
+class FailingTurnQueryParser:
+    def __init__(self, error: ServiceError, marker: str) -> None:
+        self._error = error
+        self._marker = marker
+
+    async def parse(self, message: str, context: TurnContext) -> TurnQuery:
+        raise self._error from RuntimeError(self._marker)
+
+
+class FailingConversationRepository:
+    def __init__(
+        self,
+        delegate: SqliteConversationRepository,
+        *,
+        load_error: ServiceError | None = None,
+        save_error: ServiceError | None = None,
+        marker: str,
+    ) -> None:
+        self._delegate = delegate
+        self._load_error = load_error
+        self._save_error = save_error
+        self._marker = marker
+
+    async def load(self, conversation_id: str) -> ConversationRecord | None:
+        if self._load_error is not None:
+            raise self._load_error from RuntimeError(self._marker)
+        return await self._delegate.load(conversation_id)
+
+    async def save(
+        self,
+        state: ConversationState,
+        *,
+        expected_version: int | None,
+    ) -> ConversationRecord:
+        if self._save_error is not None:
+            raise self._save_error from RuntimeError(self._marker)
+        return await self._delegate.save(state, expected_version=expected_version)
+
+
+@dataclass(frozen=True)
+class RetrievalCall:
+    max_price: float | None
+    excluded_product_ids: tuple[str, ...]
+
+
+class DeterministicRetrievalService:
+    def __init__(self, catalog: ProductCatalog) -> None:
+        self._catalog = catalog
+        self.calls: list[RetrievalCall] = []
+
+    async def retrieve_chunks(
+        self,
+        intent: ParsedIntent,
+        *,
+        excluded_product_ids: Sequence[str] = (),
+    ) -> list[RetrievedChunk]:
+        exclusions = tuple(excluded_product_ids)
+        self.calls.append(
+            RetrievalCall(
+                max_price=intent.constraints.max_price,
+                excluded_product_ids=exclusions,
+            )
+        )
+        return [
+            RetrievedChunk(
+                chunk_id=f"{product.product_id}:summary",
+                point_id=f"00000000-0000-0000-0000-{index:012d}",
+                product_id=product.product_id,
+                chunk_type="product_summary",
+                text=f"{product.title} 适合通勤",
+                source_path=f"data/{product.product_id}.json",
+                score=1 - index / 10,
+            )
+            for index, product in enumerate(self._catalog.all(), start=1)
+            if product.product_id not in exclusions
+            and (intent.category is None or product.category == intent.category)
+            and (
+                intent.sub_category is None
+                or product.sub_category == intent.sub_category
+            )
+        ]
+
+    async def fetch_product_chunks(self, product_id: str) -> list[Any]:
+        raise ServiceError(
+            "PRODUCT_KNOWLEDGE_UNAVAILABLE",
+            "product knowledge unavailable",
+            retryable=False,
+        )
+
+    def aggregate_products(
+        self, chunks: Sequence[RetrievedChunk]
+    ) -> list[ProductCandidate]:
+        by_product = {chunk.product_id: chunk for chunk in chunks}
+        return [
+            ProductCandidate(product=product, evidence=[by_product[product.product_id]])
+            for product in self._catalog.all()
+            if product.product_id in by_product
+        ]
+
+    async def rerank_candidates(
+        self, query: str, candidates: Sequence[ProductCandidate]
+    ) -> list[ProductCandidate]:
+        return [
+            candidate.model_copy(update={"rerank_score": 1 - index / 10})
+            for index, candidate in enumerate(candidates)
+        ]
+
+
+class DeterministicEvidenceService:
+    def __init__(self, catalog: ProductCatalog) -> None:
+        self._catalog = catalog
+        self.select_calls: list[SearchConstraints] = []
+
+    async def validate_candidates(
+        self,
+        candidates: Sequence[ProductCandidate],
+        constraints: SearchConstraints,
+        *,
+        category: str | None = None,
+        sub_category: str | None = None,
+    ) -> list[ValidatedCandidate]:
+        return [
+            ValidatedCandidate(
+                candidate=candidate,
+                assessment=EvidenceAssessment(
+                    product_id=candidate.product.product_id,
+                    checks=[],
+                ),
+                eligible=True,
+                rejection_reasons=[],
+            )
+            for candidate in candidates
+        ]
+
+    def select_candidates(
+        self,
+        validated: Sequence[ValidatedCandidate],
+        limit: int,
+        *,
+        constraints: SearchConstraints,
+    ) -> list[SelectedProduct]:
+        self.select_calls.append(constraints)
+        selected: list[SelectedProduct] = []
+        for candidate in validated:
+            product_id = candidate.candidate.product.product_id
+            matched = self._catalog.matched_skus(product_id, constraints)
+            if candidate.eligible and matched:
+                selected.append(
+                    SelectedProduct(
+                        product_id=product_id,
+                        rerank_score=candidate.candidate.rerank_score or 0,
+                        evidence_ids=[candidate.candidate.evidence[0].chunk_id],
+                        decision_reasons=["test_selected"],
+                        matched_sku_ids=[sku.sku_id for sku in matched],
+                    )
+                )
+        return selected[:limit]
+
+
+class DeterministicResponseGenerator:
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
+        yield "测试回复"
+
+
+def compiled_chat_dependencies(
+    tmp_path: Path,
+    *,
+    turns: Sequence[TurnQuery] = (),
+    parser: TurnQueryParser | None = None,
+    repository: ConversationRepository | None = None,
+) -> tuple[
+    ApiDependencies,
+    SequencedTurnQueryParser,
+    SqliteConversationRepository,
+    DeterministicRetrievalService,
+    DeterministicEvidenceService,
+]:
+    catalog = _catalog(tmp_path)
+    settings = Settings(
+        dashscope_api_key="test-key",
+        dataset_root=tmp_path,
+        conversation_db_path=tmp_path / "chat.sqlite3",
+        final_product_limit=3,
+        public_base_url="http://test",
+    )
+    sequenced_parser = SequencedTurnQueryParser(turns)
+    sqlite_repository = SqliteConversationRepository(settings.conversation_db_path)
+    retrieval = DeterministicRetrievalService(catalog)
+    evidence = DeterministicEvidenceService(catalog)
+    graph = build_graph(
+        WorkflowDependencies(
+            turn_query_parser=parser or sequenced_parser,
+            conversation_repository=repository or sqlite_repository,
+            retrieval_service=retrieval,
+            evidence_service=evidence,
+            response_generator=DeterministicResponseGenerator(),
+            catalog=catalog,
+            settings=settings,
+        )
+    )
+    return (
+        ApiDependencies(
+            graph=graph,
+            catalog=catalog,
+            settings=settings,
+            readiness_probe=FakeReadinessProbe(),
+            id_factory=lambda: "generated-conversation-id",
+        ),
+        sequenced_parser,
+        sqlite_repository,
+        retrieval,
+        evidence,
+    )
+
+
+def _catalog(root: Path) -> ProductCatalog:
+    products = [
+        Product.model_validate(
+            {
+                "product_id": f"p{index}",
+                "title": f"测试蓝牙耳机 {index}",
+                "brand": f"测试品牌 {index}",
+                "category": "数码电子",
+                "sub_category": "蓝牙耳机",
+                "base_price": 200.0 + index,
+                "image_path": f"images/p{index}.jpg",
+                "skus": [
+                    {
+                        "sku_id": f"p{index}-black",
+                        "properties": {"颜色": "黑色"},
+                        "price": 200.0 + index,
+                    }
+                ],
+                "rag_knowledge": {
+                    "marketing_description": "测试商品",
+                    "official_faq": [],
+                    "user_reviews": [],
+                },
+            }
+        )
+        for index in range(1, 4)
+    ]
+    return ProductCatalog(
+        root,
+        {product.product_id: product for product in products},
+        {product.product_id: f"data/{product.product_id}.json" for product in products},
+    )

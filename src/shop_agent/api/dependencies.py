@@ -10,9 +10,10 @@ from shop_agent.config import Settings
 from shop_agent.models.state import ShoppingState
 from shop_agent.services.dashscope_chat import (
     DashScopeEvidenceMapper,
-    DashScopeIntentParser,
     DashScopeResponseGenerator,
+    DashScopeTurnQueryParser,
 )
+from shop_agent.services.conversation_repository import SqliteConversationRepository
 from shop_agent.services.dashscope_embedding import DashScopeEmbedder
 from shop_agent.services.dashscope_rerank import DashScopeReranker
 from shop_agent.services.evidence import EvidenceService
@@ -73,16 +74,25 @@ def build_api_dependencies(settings: Settings | None = None) -> ApiDependencies:
     )
     graph = build_graph(
         WorkflowDependencies(
-            intent_parser=DashScopeIntentParser(
+            turn_query_parser=DashScopeTurnQueryParser(
                 resolved_settings,
-                categories=[product.category for product in catalog.all()],
-                sub_categories=[product.sub_category for product in catalog.all()],
-                category_pairs=[
-                    (product.category, product.sub_category)
-                    for product in catalog.all()
-                ],
+                categories=list(
+                    dict.fromkeys(product.category for product in catalog.all())
+                ),
+                sub_categories=list(
+                    dict.fromkeys(product.sub_category for product in catalog.all())
+                ),
+                category_pairs=list(
+                    dict.fromkeys(
+                        (product.category, product.sub_category)
+                        for product in catalog.all()
+                    )
+                ),
                 brands=catalog.brands(),
                 sku_taxonomy=catalog.sku_taxonomy(),
+            ),
+            conversation_repository=SqliteConversationRepository(
+                resolved_settings.conversation_db_path
             ),
             retrieval_service=retrieval,
             evidence_service=evidence,

@@ -3,8 +3,14 @@ from typing import Any
 
 import pytest
 
+from shop_agent.catalog import ProductCatalog
 from shop_agent.errors import ServiceError
-from shop_agent.models.query import ParsedIntent, SearchConstraints
+from shop_agent.models.conversation import (
+    CandidateReference,
+    ConversationRecord,
+    ConversationState,
+)
+from shop_agent.models.turn_query import ProductQuestion, ProductReference, TurnQuery
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 from tests.unit.workflow_fakes import build_harness, initial_state
@@ -13,7 +19,8 @@ from tests.unit.workflow_fakes import build_harness, initial_state
 def _graph(harness: Any) -> Any:
     return build_graph(
         WorkflowDependencies(
-            intent_parser=harness.parser,
+            turn_query_parser=harness.parser,
+            conversation_repository=harness.repository,
             retrieval_service=harness.retrieval,
             evidence_service=harness.evidence,
             response_generator=harness.response,
@@ -82,22 +89,50 @@ async def test_product_event_uses_catalog_facts_and_matched_skus(
 
 @pytest.mark.asyncio
 async def test_product_event_uses_only_512gb_sku_price(tmp_path: Path) -> None:
-    harness = build_harness(tmp_path, product_count=1)
+    harness = build_harness(
+        tmp_path,
+        product_count=1,
+        product_pairs=[("数码电子", "智能手机")],
+    )
     product = harness.catalog.all()[0]
     product.skus[0].properties = {"存储": "256GB"}
     product.skus[0].price = 6999
     product.skus[1].properties = {"存储配置": "512GB"}
     product.skus[1].price = 7999
-    harness.parser.intent = ParsedIntent(
-        schema_version=1,
-        intent="product_search",
-        retrieval_query="512GB手机",
-        category="数码电子",
-        sub_category="智能手机",
-        constraints=SearchConstraints(
-            max_price=8000,
-            sku_constraints={"storage": ["512GB"]},
-        ),
+    harness.catalog = ProductCatalog(
+        tmp_path,
+        {product.product_id: product},
+        {product.product_id: f"data/{product.product_id}.json"},
+    )
+    harness.evidence.catalog = harness.catalog
+    harness.parser.turn = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "new_search",
+            "slot_operations": [
+                {
+                    "slot": "category",
+                    "operation": "replace",
+                    "value": "数码电子",
+                },
+                {
+                    "slot": "sub_category",
+                    "operation": "replace",
+                    "value": "智能手机",
+                },
+                {
+                    "slot": "constraints.max_price",
+                    "operation": "replace",
+                    "value": 8000,
+                },
+                {
+                    "slot": "constraints.sku_constraints",
+                    "operation": "add",
+                    "value": "512GB",
+                    "sku_key": "storage",
+                },
+            ],
+        }
     )
 
     parts = await _drain(_graph(harness), "推荐8000元以内的512GB手机")
@@ -153,6 +188,52 @@ async def test_empty_model_stream_raises_generation_failure(tmp_path: Path) -> N
     assert error.value.code == "GENERATION_FAILED"
     assert error.value.message == "model returned no response text"
     assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_product_question_stream_contains_text_deltas_only(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    harness.repository.record = ConversationRecord(
+        state=ConversationState(
+            schema_version=1,
+            conversation_id="conversation-fixed",
+            recent_candidates=[
+                CandidateReference(
+                    rank=index,
+                    product_id=f"p{index}",
+                    display_price=399 + index,
+                )
+                for index in range(1, 4)
+            ],
+            seen_product_ids=["p1", "p2", "p3"],
+        ),
+        version=2,
+    )
+    harness.parser.turn = TurnQuery(
+        schema_version=1,
+        intent="product_question",
+        reference=ProductReference(
+            target_type="product",
+            surface_text="第二个",
+            kind="ordinal",
+            ordinal=2,
+        ),
+        product_question=ProductQuestion(
+            text="第二个多少钱",
+            kind="structured",
+            field="display_price",
+        ),
+    )
+
+    parts = await _drain(_graph(harness), "第二个多少钱")
+
+    assert [part["data"]["event"] for part in parts] == [
+        "text_delta",
+        "text_delta",
+    ]
+    assert harness.repository.record.state.focused_product_id == "p2"
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.retrieval.fetch_product_calls == []
 
 
 async def _drain(graph: Any, message: str) -> list[dict[str, Any]]:

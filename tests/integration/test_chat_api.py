@@ -11,9 +11,15 @@ from shop_agent.api.dependencies import ApiDependencies
 from shop_agent.catalog import ProductCatalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
+from shop_agent.models.retrieval import EvidenceChunk
+from shop_agent.models.turn_query import TurnQuery
+from shop_agent.services.conversation_repository import SqliteConversationRepository
 from tests.integration.api_fakes import (
     FakeGraph,
     FakeReadinessProbe,
+    FailingConversationRepository,
+    FailingTurnQueryParser,
+    compiled_chat_dependencies,
     parse_sse,
     product_event,
 )
@@ -190,6 +196,440 @@ async def test_existing_conversation_id_is_forwarded(sample_dataset_root: Path) 
     events = parse_sse(response.text)
     assert events[0].data["conversation_id"] == "conversation-user"
     assert graph.calls[0]["state"]["conversation_id"] == "conversation-user"
+
+
+@pytest.mark.asyncio
+async def test_compiled_graph_persists_refinement_and_isolates_conversations(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "refine_search",
+                "slot_operations": [
+                    {
+                        "slot": "constraints.max_price",
+                        "operation": "replace",
+                        "value": 300,
+                    }
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+    ]
+    dependencies, parser, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path, turns=turns
+    )
+
+    first = await _post(
+        dependencies,
+        {"conversation_id": "c1", "message": "推荐蓝牙耳机"},
+    )
+    refined = await _post(
+        dependencies,
+        {"conversation_id": "c1", "message": "预算改成300"},
+    )
+    isolated = await _post(
+        dependencies,
+        {"conversation_id": "c2", "message": "推荐蓝牙耳机"},
+    )
+
+    for response, conversation_id in ((first, "c1"), (refined, "c1"), (isolated, "c2")):
+        events = parse_sse(response.text)
+        names = [event.name for event in events]
+        assert names[0] == "message_start"
+        assert names[-1] == "message_end"
+        assert names == [
+            "message_start",
+            *["product"] * names.count("product"),
+            *["text_delta"] * names.count("text_delta"),
+            "message_end",
+        ]
+        assert 0 <= names.count("product") <= 3
+        assert names.count("text_delta") >= 1
+        assert events[0].data["conversation_id"] == conversation_id
+        assert events[-1].data["status"] == "completed"
+
+    assert parser.calls == ["推荐蓝牙耳机", "预算改成300", "推荐蓝牙耳机"]
+    assert parser.contexts[0].query_snapshot is None
+    assert parser.contexts[1].query_snapshot is not None
+    assert parser.contexts[1].query_snapshot.constraints.max_price is None
+    assert parser.contexts[1].recent_candidates
+    assert parser.contexts[2].query_snapshot is None
+    assert parser.contexts[2].recent_candidates == []
+    assert parser.contexts[2].focused_product_id is None
+    assert retrieval.calls[1].max_price == 300
+    assert retrieval.calls[1].excluded_product_ids == ()
+    c1 = await repository.load("c1")
+    c2 = await repository.load("c2")
+    assert c1 is not None
+    assert c2 is not None
+    assert c1.state.query_snapshot is not None
+    assert c1.state.query_snapshot.constraints.max_price == 300
+    assert c1.state.recent_candidates
+    assert c1.state.seen_product_ids
+    assert c2.state.query_snapshot is not None
+    assert c2.state.query_snapshot.constraints.max_price is None
+    assert c2.state.recent_candidates
+    assert c2.state.seen_product_ids
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_dialogue_persists_focus_for_follow_up_pronoun(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "第二个",
+                    "kind": "ordinal",
+                    "ordinal": 2,
+                },
+                "product_question": {
+                    "text": "第二个防水吗",
+                    "kind": "semantic",
+                },
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "它",
+                    "kind": "demonstrative",
+                },
+                "product_question": {
+                    "text": "它续航怎么样",
+                    "kind": "semantic",
+                },
+            }
+        ),
+    ]
+    dependencies, parser, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=turns,
+    )
+    focused_fetches: list[str] = []
+
+    async def fetch_product_chunks(product_id: str) -> list[EvidenceChunk]:
+        focused_fetches.append(product_id)
+        return [
+            EvidenceChunk(
+                chunk_id=f"{product_id}:summary",
+                point_id=f"point-{product_id}",
+                product_id=product_id,
+                chunk_type="product_summary",
+                text="确定性的商品知识。",
+                source_path=f"data/{product_id}.json",
+            )
+        ]
+
+    retrieval.fetch_product_chunks = fetch_product_chunks  # type: ignore[method-assign]
+
+    displayed = await _post(
+        dependencies,
+        {"conversation_id": "focus-dialogue", "message": "展示三款"},
+    )
+    ordinal = await _post(
+        dependencies,
+        {"conversation_id": "focus-dialogue", "message": "第二个防水吗"},
+    )
+    pronoun = await _post(
+        dependencies,
+        {"conversation_id": "focus-dialogue", "message": "它续航怎么样"},
+    )
+
+    displayed_events = parse_sse(displayed.text)
+    ordinal_events = parse_sse(ordinal.text)
+    pronoun_events = parse_sse(pronoun.text)
+    assert [event.name for event in displayed_events] == [
+        "message_start",
+        "product",
+        "product",
+        "product",
+        "text_delta",
+        "message_end",
+    ]
+    for events in (ordinal_events, pronoun_events):
+        assert [event.name for event in events] == [
+            "message_start",
+            "text_delta",
+            "message_end",
+        ]
+        assert events[-1].data["status"] == "completed"
+    assert focused_fetches == ["p2", "p2"]
+    assert retrieval.calls.__len__() == 1
+    assert parser.contexts[2].focused_product_id == "p2"
+    saved = await repository.load("focus-dialogue")
+    assert saved is not None
+    assert saved.version == 3
+    assert saved.state.focused_product_id == "p2"
+    assert [item.product_id for item in saved.state.recent_candidates] == [
+        "p1",
+        "p2",
+        "p3",
+    ]
+    assert saved.state.seen_product_ids == ["p1", "p2", "p3"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message", "retryable"),
+    [
+        ("CONVERSATION_UNAVAILABLE", "conversation storage unavailable", True),
+        (
+            "CONVERSATION_CONFLICT",
+            "conversation state changed; retry the request",
+            True,
+        ),
+        ("TURN_QUERY_PARSE_FAILED", "invalid structured output", True),
+    ],
+)
+async def test_known_pre_product_errors_keep_public_sse_contract(
+    sample_dataset_root: Path,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> None:
+    graph = FakeGraph(
+        [],
+        error=ServiceError(code, message, retryable=retryable),  # type: ignore[arg-type]
+    )
+
+    response = await _post(
+        _dependencies(sample_dataset_root, graph), {"message": "推荐耳机"}
+    )
+
+    events = parse_sse(response.text)
+    assert [event.name for event in events] == [
+        "message_start",
+        "error",
+        "message_end",
+    ]
+    assert events[1].data == {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+    }
+    assert events[-1].data["status"] == "failed"
+    assert "upstream-model-secret" not in response.text
+    assert "SELECT private_chunk" not in response.text
+    assert "C:\\private\\chat.sqlite3" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_point", "error", "marker"),
+    [
+        (
+            "load",
+            ServiceError(
+                "CONVERSATION_UNAVAILABLE",
+                "conversation storage unavailable",
+                retryable=True,
+            ),
+            "SELECT private_chunk FROM C:\\private\\chat.sqlite3",
+        ),
+        (
+            "save",
+            ServiceError(
+                "CONVERSATION_CONFLICT",
+                "conversation state changed; retry the request",
+                retryable=True,
+            ),
+            "SQL conflict secret at C:\\private\\chat.sqlite3",
+        ),
+        (
+            "parse",
+            ServiceError(
+                "TURN_QUERY_PARSE_FAILED",
+                "invalid structured output",
+                retryable=True,
+            ),
+            "model-response-secret: <untrusted-json>",
+        ),
+    ],
+)
+async def test_compiled_graph_pre_product_errors_are_safe_over_http(
+    tmp_path: Path,
+    failure_point: str,
+    error: ServiceError,
+    marker: str,
+) -> None:
+    parser = (
+        FailingTurnQueryParser(error, marker) if failure_point == "parse" else None
+    )
+    repository = (
+        FailingConversationRepository(
+            SqliteConversationRepository(tmp_path / "chat.sqlite3"),
+            load_error=error if failure_point == "load" else None,
+            save_error=error if failure_point == "save" else None,
+            marker=marker,
+        )
+        if failure_point in {"load", "save"}
+        else None
+    )
+    dependencies, _, _, retrieval, evidence = compiled_chat_dependencies(
+        tmp_path,
+        turns=[
+            TurnQuery.model_validate(
+                {
+                    "schema_version": 1,
+                    "intent": "new_search",
+                    "slot_operations": [
+                        {
+                            "slot": "category",
+                            "operation": "replace",
+                            "value": "数码电子",
+                        },
+                        {
+                            "slot": "sub_category",
+                            "operation": "replace",
+                            "value": "蓝牙耳机",
+                        },
+                    ],
+                }
+            )
+        ],
+        parser=parser,
+        repository=repository,
+    )
+
+    response = await _post(
+        dependencies,
+        {"conversation_id": "c1", "message": "推荐蓝牙耳机"},
+    )
+
+    events = parse_sse(response.text)
+    assert [event.name for event in events] == [
+        "message_start",
+        "error",
+        "message_end",
+    ]
+    assert events[1].data == error.to_payload()
+    assert events[-1].data["status"] == "failed"
+    assert marker not in response.text
+    assert "upstream-model-secret" not in response.text
+    assert "SELECT private_chunk" not in response.text
+    assert "C:\\private\\chat.sqlite3" not in response.text
+    if failure_point == "save":
+        assert retrieval.calls
+        assert evidence.select_calls
+    else:
+        assert retrieval.calls == []
+        assert evidence.select_calls == []
+
+
+@pytest.mark.asyncio
+async def test_compiled_graph_product_knowledge_error_ends_without_product_or_text(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "第一个",
+                    "kind": "ordinal",
+                    "ordinal": 1,
+                },
+                "product_question": {
+                    "text": "第一个防水吗",
+                    "kind": "semantic",
+                },
+            }
+        ),
+    ]
+    dependencies, _, _, _, _ = compiled_chat_dependencies(tmp_path, turns=turns)
+
+    initial = await _post(
+        dependencies,
+        {"conversation_id": "c1", "message": "推荐蓝牙耳机"},
+    )
+    failed = await _post(
+        dependencies,
+        {"conversation_id": "c1", "message": "第一个防水吗"},
+    )
+
+    assert "product" in [event.name for event in parse_sse(initial.text)]
+    events = parse_sse(failed.text)
+    assert [event.name for event in events] == [
+        "message_start",
+        "error",
+        "message_end",
+    ]
+    assert events[1].data == {
+        "code": "PRODUCT_KNOWLEDGE_UNAVAILABLE",
+        "message": "product knowledge unavailable",
+        "retryable": False,
+    }
+    assert events[-1].data["status"] == "failed"
+    assert "upstream-model-secret" not in failed.text
+    assert "SELECT private_chunk" not in failed.text
 
 
 @pytest.mark.asyncio

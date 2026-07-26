@@ -9,23 +9,33 @@ from shop_agent.api.dependencies import ApiDependencies
 from shop_agent.catalog import ProductCatalog
 from shop_agent.cli.index_products import index_catalog
 from shop_agent.config import Settings
+from shop_agent.models.conversation import (
+    CandidateReference,
+    ConversationState,
+    QuerySnapshot,
+)
 from shop_agent.models.query import ParsedIntent, SearchConstraints
 from shop_agent.models.retrieval import (
+    EvidenceChunk,
     ProductCandidate,
     RetrievedChunk,
     SelectedProduct,
     ValidatedCandidate,
 )
+from shop_agent.models.turn_query import TurnCandidateSummary
 from shop_agent.services.dashscope_chat import (
     DashScopeEvidenceMapper,
-    DashScopeIntentParser,
     DashScopeResponseGenerator,
+    DashScopeTurnQueryParser,
 )
+from shop_agent.services.conversation_repository import SqliteConversationRepository
 from shop_agent.services.dashscope_embedding import DashScopeEmbedder
 from shop_agent.services.dashscope_rerank import DashScopeReranker
 from shop_agent.services.evidence import EvidenceService
 from shop_agent.services.qdrant_store import QdrantStore
 from shop_agent.services.retrieval import RetrievalService
+from shop_agent.services.multi_turn_query_compiler import merge_turn_query
+from shop_agent.services.ports import TurnContext
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 from tests.integration.api_fakes import ParsedSseEvent, parse_sse
@@ -47,9 +57,20 @@ class InstrumentedRetrievalService:
         self.aggregate_calls = 0
         self.rerank_calls = 0
 
-    async def retrieve_chunks(self, intent: ParsedIntent) -> list[RetrievedChunk]:
+    async def retrieve_chunks(
+        self,
+        intent: ParsedIntent,
+        *,
+        excluded_product_ids: Sequence[str] = (),
+    ) -> list[RetrievedChunk]:
         self.retrieve_calls += 1
-        return await self.delegate.retrieve_chunks(intent)
+        return await self.delegate.retrieve_chunks(
+            intent,
+            excluded_product_ids=excluded_product_ids,
+        )
+
+    async def fetch_product_chunks(self, product_id: str) -> list[EvidenceChunk]:
+        return await self.delegate.fetch_product_chunks(product_id)
 
     def aggregate_products(
         self, chunks: Sequence[RetrievedChunk]
@@ -110,6 +131,17 @@ async def test_live_single_turn_shopping_flow() -> None:
     if not settings.dashscope_api_key.strip():
         pytest.fail("DASHSCOPE_API_KEY is required for live tests")
     catalog = ProductCatalog.load(settings.dataset_root)
+    turn_query_parser = DashScopeTurnQueryParser(
+        settings,
+        categories=[product.category for product in catalog.all()],
+        sub_categories=[product.sub_category for product in catalog.all()],
+        category_pairs=[
+            (product.category, product.sub_category) for product in catalog.all()
+        ],
+        brands=catalog.brands(),
+        sku_taxonomy=catalog.sku_taxonomy(),
+    )
+    await _assert_live_turn_query_parser_contracts(turn_query_parser, catalog)
     store = QdrantStore(settings)
 
     embedder = DashScopeEmbedder(settings)
@@ -138,15 +170,9 @@ async def test_live_single_turn_shopping_flow() -> None:
     )
     graph = build_graph(
         WorkflowDependencies(
-            intent_parser=DashScopeIntentParser(
-                settings,
-                categories=[product.category for product in catalog.all()],
-                sub_categories=[product.sub_category for product in catalog.all()],
-                category_pairs=[
-                    (product.category, product.sub_category)
-                    for product in catalog.all()
-                ],
-                brands=catalog.brands(),
+            turn_query_parser=turn_query_parser,
+            conversation_repository=SqliteConversationRepository(
+                settings.conversation_db_path
             ),
             retrieval_service=retrieval,
             evidence_service=evidence,
@@ -191,6 +217,87 @@ async def test_live_single_turn_shopping_flow() -> None:
         constrained_products = _product_events(constrained)
         assert all(event.data["display_price"] <= 500 for event in constrained_products)
         _assert_exclusion_evidence(constrained_products, evidence.last_validated)
+
+
+async def _assert_live_turn_query_parser_contracts(
+    parser: DashScopeTurnQueryParser,
+    catalog: ProductCatalog,
+) -> None:
+    earphones = [
+        product for product in catalog.all() if product.sub_category == "真无线耳机"
+    ][:3]
+    assert len(earphones) == 3
+    snapshot = QuerySnapshot(
+        category="数码电子",
+        sub_category="真无线耳机",
+        constraints=SearchConstraints(include_brands=["小米"], max_price=500),
+    )
+    candidates = [
+        CandidateReference(
+            rank=rank,
+            product_id=product.product_id,
+            display_price=min(sku.price for sku in product.skus),
+        )
+        for rank, product in enumerate(earphones, start=1)
+    ]
+    state = ConversationState(
+        schema_version=1,
+        conversation_id="live-parser-contract",
+        query_snapshot=snapshot,
+        recent_candidates=candidates,
+        seen_product_ids=[product.product_id for product in earphones],
+    )
+    context = TurnContext(
+        query_snapshot=snapshot,
+        recent_candidates=[
+            TurnCandidateSummary(
+                rank=rank,
+                product_id=product.product_id,
+                title=product.title,
+                brand=product.brand,
+            )
+            for rank, product in enumerate(earphones, start=1)
+        ],
+    )
+
+    budget = await parser.parse("预算改成300", context)
+    assert budget.intent == "refine_search"
+    budget_result = merge_turn_query(budget, state, catalog)
+    assert budget_result.needs_clarification is False
+    assert budget_result.snapshot is not None
+    assert budget_result.snapshot.constraints.max_price == 300
+
+    exclude = await parser.parse("不要小米了", context)
+    exclude_result = merge_turn_query(exclude, state, catalog)
+    assert exclude_result.needs_clarification is False
+    assert exclude_result.snapshot is not None
+    assert "小米" not in exclude_result.snapshot.constraints.include_brands
+
+    ordinal = await parser.parse("第二个怎么样", context)
+    assert ordinal.intent == "product_question"
+    assert ordinal.reference is not None
+    assert ordinal.reference.kind == "ordinal"
+    assert ordinal.reference.ordinal == 2
+
+    brand = await parser.parse("那个小米的", context)
+    assert brand.reference is not None
+    assert brand.reference.kind == "brand"
+    assert brand.reference.brand == "小米"
+
+    switch = await parser.parse("再看看手机", context)
+    assert any(
+        operation.slot == "sub_category"
+        and operation.operation == "replace"
+        and operation.value == "智能手机"
+        for operation in switch.slot_operations
+    )
+    switch_result = merge_turn_query(switch, state, catalog)
+    assert switch_result.intent == "switch_category"
+    assert switch_result.needs_clarification is False
+    assert switch_result.snapshot == QuerySnapshot(
+        category="数码电子",
+        sub_category="智能手机",
+    )
 
 
 async def _chat(client: httpx.AsyncClient, message: str) -> list[ParsedSseEvent]:

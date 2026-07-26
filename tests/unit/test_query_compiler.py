@@ -2,7 +2,7 @@ import pytest
 
 from shop_agent.catalog import ProductCatalog
 from shop_agent.models.query import ParsedIntent, SearchConstraints
-from shop_agent.services.query_compiler import compile_query
+from shop_agent.services.query_compiler import compile_effective_query
 
 
 def _intent(*, min_price: float | None = None, max_price: float | None = None) -> ParsedIntent:
@@ -41,7 +41,7 @@ def catalog() -> ProductCatalog:
         ),
     ],
 )
-def test_compile_query_merges_explicit_and_value_price_constraints(
+def test_compile_effective_query_merges_explicit_and_value_price_constraints(
     catalog: ProductCatalog,
     intent: ParsedIntent,
     expected_min: float | None,
@@ -49,7 +49,7 @@ def test_compile_query_merges_explicit_and_value_price_constraints(
     applied: bool,
     skip_reason: str | None,
 ) -> None:
-    result = compile_query(intent, catalog)
+    result = compile_effective_query(intent, catalog)
 
     assert result.needs_clarification is False
     assert result.effective_constraints.min_price == expected_min
@@ -59,24 +59,24 @@ def test_compile_query_merges_explicit_and_value_price_constraints(
     assert result.price_reference.skip_reason == skip_reason
 
 
-def test_compile_query_requires_category_pair_for_value_preference(
+def test_compile_effective_query_requires_category_pair_for_value_preference(
     catalog: ProductCatalog,
 ) -> None:
     intent = _intent().model_copy(update={"sub_category": None})
 
-    result = compile_query(intent, catalog)
+    result = compile_effective_query(intent, catalog)
 
     assert result.needs_clarification is True
     assert result.clarification_message == "请明确想购买的商品类型，例如手机、T恤或耳机。"
 
 
-def test_compile_query_preserves_constraints_without_value_preference(
+def test_compile_effective_query_preserves_constraints_without_value_preference(
     catalog: ProductCatalog,
 ) -> None:
     constraints = SearchConstraints(max_price=5000, include_brands=["Apple 苹果"])
     intent = _intent().model_copy(update={"constraints": constraints})
 
-    result = compile_query(intent, catalog)
+    result = compile_effective_query(intent, catalog)
 
     assert result.effective_constraints == constraints
     assert result.price_reference is None
