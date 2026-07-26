@@ -10,4 +10,3 @@ coverage.xml
 htmlcov/
 qdrant_storage/
 .data/
-.superpowers/
