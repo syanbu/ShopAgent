@@ -285,6 +285,10 @@ Catalog 启动加载时按 `category + sub_category` 建立只读价格基准。
 
 ## 本地运行
 
+以下命令与说明保留为第一阶段单轮工作流的历史本地运行记录。现行生产图仍复用其中的
+Catalog、DashScope、Qdrant、索引和 HTTP 入口，但会话恢复与图路由以
+[多轮 Query 编译与指代消解](multi-turn-query-engine.md) 为准。
+
 ```bash
 uv sync
 cp .env.example .env
@@ -293,7 +297,7 @@ uv run python -m shop_agent.cli.index_products
 uv run uvicorn shop_agent.api.app:app --reload
 ```
 
-在 `.env` 中至少配置 `DASHSCOPE_API_KEY`，并按需覆盖聊天、Embedding、重排模型、Qdrant 地址、集合名、召回数量、超时、数据集目录和公开图片基础 URL。Compose 只把无认证的本地 Qdrant 绑定到 `127.0.0.1:6333`，不会暴露给局域网。首个版本只处理单轮请求；`conversation_id` 仅关联事件，不恢复历史状态。
+在 `.env` 中至少配置 `DASHSCOPE_API_KEY`，并按需覆盖聊天、Embedding、重排模型、Qdrant 地址、集合名、召回数量、超时、数据集目录和公开图片基础 URL。Compose 只把无认证的本地 Qdrant 绑定到 `127.0.0.1:6333`，不会暴露给局域网。在第一阶段的历史单轮版本中，`conversation_id` 仅关联事件、不恢复历史状态；现行生产服务已将它作为 SQLite 会话状态主键。
 
 服务启动后，可在另一个终端运行交互式测试客户端：
 
@@ -301,7 +305,7 @@ uv run uvicorn shop_agent.api.app:app --reload
 .venv/bin/python scripts/chat_client.py
 ```
 
-客户端会在本次进程中复用同一个 `conversation_id`，输入 `/quit` 或 `/exit` 退出。当前服务仍按单轮请求处理，复用标识只用于关联事件。也可发送单条消息并在响应结束后退出：
+客户端会在本次进程中复用同一个 `conversation_id`，输入 `/quit` 或 `/exit` 退出。在第一阶段的历史单轮服务中，复用标识只用于关联事件；现行生产服务会据此恢复查询快照、最近候选、焦点与待澄清状态。也可发送单条消息并在响应结束后退出：
 
 ```bash
 .venv/bin/python scripts/chat_client.py --message "推荐一款降噪耳机"
@@ -328,13 +332,18 @@ RUN_LIVE_TESTS=1 uv run pytest tests/live/test_live_shopping_flow.py -m live -q
 
 ## 代码与验证
 
+以下主体记录第一阶段单轮检索链路的实现与验收，不作为现行生产图入口的说明。当前
+`build_graph()`、SQLite 会话恢复、指代与澄清行为由
+[多轮 Query 编译与指代消解](multi-turn-query-engine.md) 接管；本节保留原始单轮验证
+事实，便于追溯检索、证据和 SSE 基线。
+
 基础配置、Schema、商品目录、DashScope 模型网关、Qdrant 集合管理、离线索引入口、在线召回聚合、重排结果绑定、证据校验、候选决策、LangGraph 工作流和 FastAPI 接口均已创建，并通过真实 DashScope/Qdrant 冒烟与手工 SSE 验收。离线索引使用 `python -m shop_agent.cli.index_products`，以不超过 20 条的批次生成 1024 维文档向量，并按稳定 UUID point ID 幂等 upsert 到 `product_text_chunks_v1`。本地 Qdrant 由 `compose.yaml` 启动；索引器不会删除或重建已有生产集合。
 
 `RetrievalService` 使用意图中的查询文本生成 query embedding，并把类目、子类目、品牌和价格约束交给 Qdrant。召回结果必须能在 catalog 中解析为真实商品；每个商品只保留分数最高的五条证据，并将最多十个商品交给重排序。`EvidenceService` 重新使用 catalog 校验类目、子类目、品牌和实际 SKU 价格，只有语义条件存在且结构化条件已经通过时才调用证据映射模型。模型返回的决定性和冲突证据 ID 都必须属于该商品的召回证据，同一条件不得重复；未知 ID 或重复条件直接映射为不可重试的 `EVIDENCE_PARSE_FAILED`。
 
 候选选择只读取已标记为 eligible 且具有本次重排分数的商品，按分数降序返回最多三个结果。选择接口必须显式接收与校验阶段相同的 `SearchConstraints`，`matched_sku_ids` 使用该约束重新从 catalog 精确计算；语义证据列表只保留当前条件下状态为 `supported` 的决定性证据，不包含冲突证据。
 
-`build_graph()` 使用显式条件边编译无 checkpointer 的单轮图。非购物输入直接进入回复节点；零召回和证据校验后无合格候选都会跳过剩余候选链路。候选决策先从 catalog 重新组装商品卡片，并通过 LangGraph custom stream 发出 `product` 事件；随后回复节点逐段发出非空 `text_delta`。商品提示词只包含用户原话、已选商品的结构化字段、匹配 SKU 和决定性证据文本，并明确禁止库存、优惠、优惠券、购买链接和白名单之外的事实。缺失请求或会话标识时，工作流通过可注入 ID 工厂补齐，便于接口接入和确定性测试。
+第一阶段的 `build_graph()` 使用显式条件边编译无 checkpointer 的单轮图。非购物输入直接进入回复节点；零召回和证据校验后无合格候选都会跳过剩余候选链路。候选决策先从 catalog 重新组装商品卡片，并通过 LangGraph custom stream 发出 `product` 事件；随后回复节点逐段发出非空 `text_delta`。商品提示词只包含用户原话、已选商品的结构化字段、匹配 SKU 和决定性证据文本，并明确禁止库存、优惠、优惠券、购买链接和白名单之外的事实。缺失请求或会话标识时，工作流通过可注入 ID 工厂补齐，便于接口接入和确定性测试。现行生产 `build_graph()` 已改为先加载 SQLite 会话、解析 `TurnQuery` 并完成确定性指代与快照编译，再复用本节的检索和证据链路。
 
 FastAPI 应用在 lifespan 中延迟装配真实服务，测试可注入 graph、catalog、settings 和 Qdrant readiness probe。聊天接口在图运行前生成关联 ID，直接把 LangGraph custom part 转换为同名 SSE 事件；依赖错误在商品发送前返回 `failed`，商品发送后返回 `partial`，客户端取消则立即向图传播且不补发结束事件。图片接口只按 catalog 中的安全相对路径返回文件，未知商品和文件缺失统一返回不含本地路径的 404。健康接口同时检查 catalog、模型配置以及非空且向量配置匹配的目标 Qdrant collection，任一依赖不可用即返回 503 与逐项状态。最终生成的事实边界使用 system role，用户原话只作为待处理数据。
 

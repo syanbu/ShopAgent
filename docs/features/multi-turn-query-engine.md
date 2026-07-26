@@ -72,6 +72,8 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 - 裸指代词优先指向已明确的焦点商品。
 - 没有焦点但最近只展示一个商品时，裸指代指向该商品。
 - 没有焦点且最近展示多个商品时，裸指代触发澄清。
+- 商品追问即使没有显式 `reference`，也按裸指代规则使用焦点或唯一最近候选；多候选
+  且无焦点时必须进入澄清，不能直接落入商品知识失败。
 - 模型只能提取指代线索，可信 `product_id` 必须由代码根据 Catalog 和会话状态生成。
 
 用户明确选择某个候选后，该商品成为焦点。连续追问中的“它”可以指向该焦点。新
@@ -88,6 +90,10 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 pending、取消暂停操作并要求用户重新完整描述，避免澄清死循环。这保持“连续两次无法
 解析即退出”的规则，不会保存一个等待第 3 次回答的状态。
 
+`missing_context` 同时覆盖“尚无查询快照”和“已有快照但缺少最近展示价格基准”。
+澄清答案恢复时，只有前者将暂停操作转为 `new_search`；后者保留暂停的搜索意图，在
+已有快照上合并明确预算，避免丢失品类与未修改条件。
+
 ### 品类切换
 
 用户明确提出与当前不同的商品子品类时，代码将本轮视为品类切换并清空旧预算、品牌、
@@ -102,6 +108,11 @@ SKU、场景、必需特征、排除条件、最近候选、焦点和已展示�
 `recent_candidates` 只保存最近一批商品，服务于指代；`seen_product_ids` 累积当前
 查询条件下已经展示的商品，只服务于“还有吗”“换一批”的排重。连续换一批时排除
 全部 `seen_product_ids`，但用户不能通过序数引用更早批次的商品。
+
+只有不含任何 query mutation 的纯 `more_results` 保持快照并携带 seen 排除。若同轮
+还包含语义词、槽位/价格、相对价格或解析出的品牌变化，则确定性转为
+`refine_search`（品类变化仍优先成为 `switch_category`），应用操作、清空旧 seen，
+并从全库重新检索，不能静默丢弃已经抽取的条件。
 
 ### 相对价格
 
@@ -179,7 +190,7 @@ SlotOperation
   sku_key: CanonicalSkuKey | null
 ```
 
-语义词 `add/remove` 必须带非空 `value`，`clear` 不带值。`category`、
+语义词 `add/remove` 的 `value` 会先去除首尾空白并且必须非空，`clear` 不带值。`category`、
 `sub_category`、价格边界与 `price_preference` 只接受 `replace/clear`；品牌和 feature
 列表只接受 `add/remove/clear`。SKU 操作使用 `sku_key` 指定一个规范属性，离散值只在
 `add/remove` 时提供；`clear` 清空该 key。数值条件的 `add/remove` 携带完整
@@ -355,6 +366,11 @@ SQLite 读取失败不能降级为无历史单轮请求。Qdrant 不可用时，
 结构化事实仍可回答；依赖文本证据的问题必须明确失败，不能使用模型常识。TurnQuery
 非法时沿用一次结构化纠错，第二次失败进入统一 SSE 错误链路。
 
+TurnQuery 的 taxonomy 后校验同时覆盖槽位品牌和
+`ProductReference(kind="brand").brand`，均要求与 Catalog 品牌精确一致。引用品牌首轮
+越界时沿用一次 structured correction；第二次仍越界时安全归一化为可重试的
+`TURN_QUERY_PARSE_FAILED`，不向客户端泄露模型原始内容。
+
 搜索结果由 `persist_search_result` 保存后才发送 `product` 和推荐文本；零结果由
 `persist_no_results` 保存后才发送文本；商品追问由 `persist_focus` 保存焦点和清除
 pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层保持
@@ -413,41 +429,50 @@ pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层�
 |---|---|
 | 最近一批中的序数、指示、品牌和商品名；旧批次不可引用 | `tests/unit/test_reference_resolver.py::test_resolver_uses_the_expected_product_reference_branch`、`test_resolver_matches_a_unique_brand_to_one_product`、`test_resolver_matches_an_exact_casefolded_product_name_only`、`test_resolver_never_resolves_a_product_only_seen_in_an_older_batch` |
 | 焦点和后续代词 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_ordinal_question_sets_focus_and_pronoun_reuses_it`；`tests/integration/test_chat_api.py::test_compiled_http_dialogue_persists_focus_for_follow_up_pronoun` |
-| 歧义保存/恢复、取消、新搜索覆盖、两次退出 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_ambiguous_question_persists_and_answer_resumes_p2`、`test_cancel_clears_pending_persists_and_emits_exact_text`、`test_clear_new_search_discards_pending_without_reviving_suspended_action`、`test_second_unresolved_attempt_clears_pending_and_requests_complete_restatement` |
+| 歧义保存/恢复、取消、新搜索覆盖、两次退出 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_ambiguous_question_persists_and_answer_resumes_p2`、`test_cancel_clears_pending_persists_and_emits_exact_text`、`test_clear_new_search_discards_pending_without_reviving_suspended_action`、`test_second_unresolved_attempt_clears_pending_and_requests_complete_restatement`、`test_ambiguous_pending_answer_without_reference_exits_attempt_limit` |
 | 品类切换重置 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_category_switch_resets_old_query_and_display_state`；`tests/unit/test_multi_turn_query_compiler.py::test_category_switch_resets_old_state_and_keeps_only_restated_slots` |
-| 标量、列表、SKU、数值和语义操作 | `tests/unit/test_multi_turn_query_compiler.py::test_refinement_replaces_budget_and_preserves_unrelated_slot`、`test_brand_and_feature_slots_support_remove_and_clear`、`test_sku_operations_are_stable_and_copy_on_write`、`test_numeric_operations_are_stable_and_copy_on_write`、`test_semantic_terms_add_and_remove_in_stable_order` |
-| 相对价格基准与明确金额覆盖 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent`；`tests/unit/test_multi_turn_query_compiler.py::test_focus_price_is_the_cheaper_baseline`、`test_latest_batch_extreme_is_relative_price_baseline`、`test_explicit_applicable_boundary_overrides_relative_price` |
-| seen 累积且 ordinal 只看最新批 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_more_batches_accumulate_seen_and_final_ordinal_targets_h` |
+| 标量、列表、SKU、数值和语义操作 | `tests/unit/test_multi_turn_query_compiler.py::test_refinement_replaces_budget_and_preserves_unrelated_slot`、`test_brand_and_feature_slots_support_remove_and_clear`、`test_sku_operations_are_stable_and_copy_on_write`、`test_numeric_operations_are_stable_and_copy_on_write`、`test_semantic_terms_add_and_remove_in_stable_order`；`tests/unit/test_turn_query_models.py::test_semantic_term_add_and_remove_reject_blank_values` |
+| 相对价格基准与明确金额覆盖 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent`、`test_missing_price_baseline_answer_preserves_existing_snapshot_and_retrieves`；`tests/unit/test_multi_turn_query_compiler.py::test_focus_price_is_the_cheaper_baseline`、`test_latest_batch_extreme_is_relative_price_baseline`、`test_explicit_applicable_boundary_overrides_relative_price` |
+| seen 累积、mutation 全库重检索且 ordinal 只看最新批 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_more_batches_accumulate_seen_and_final_ordinal_targets_h`、`test_more_results_with_query_mutation_refines_from_full_catalog`；`tests/unit/test_multi_turn_query_compiler.py::test_more_results_with_price_operation_becomes_refinement`、`test_more_results_with_semantic_operation_becomes_refinement`、`test_more_results_with_relative_price_becomes_refinement` |
+| 无显式商品 reference 的焦点/单候选回退与多候选澄清 | `tests/unit/test_multi_turn_workflow.py::test_reference_less_product_question_uses_focused_product`、`test_reference_less_product_question_uses_only_recent_candidate`、`test_reference_less_product_question_with_multiple_candidates_clarifies` |
+| TurnQuery 引用品牌 taxonomy 纠正与安全失败 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_invalid_reference_brand`、`test_turn_query_parser_normalizes_twice_invalid_reference_brand` |
 | Catalog 结构化事实与 Qdrant 精确商品 scroll | `tests/unit/test_multi_turn_workflow.py::test_structured_fields_are_catalog_and_current_snapshot_only`；`tests/unit/test_qdrant_filters.py::test_fetch_product_chunks_scrolls_all_pages_in_order_without_scores`；`tests/unit/test_retrieval_service.py::test_fetch_product_chunks_delegates_without_embedding_or_reranking` |
 | SQLite 重建、隔离、版本冲突和错误归一化 | `tests/unit/test_conversation_repository.py::test_save_new_state_creates_parent_and_survives_repository_recreation`、`test_conversations_remain_isolated`、`test_stale_version_returns_retryable_conversation_conflict`、`test_invalid_persisted_state_is_normalized_without_content_leakage` |
 | 固定商品数据、无失效迁移、v1 无 Redis/MySQL | `tests/unit/test_conversation_repository.py::test_state_json_is_compact_domain_state_without_product_body` 固化只存 ID/领域状态的边界；固定数据和无 Redis/MySQL 是本文“范围”和“关键决策”的显式 v1 限制 |
-| HTTP/SSE 兼容及生成/保存失败顺序 | `tests/integration/test_chat_api.py::test_chat_stream_emits_start_products_text_and_end`、`test_generation_failure_after_products_is_partial`、`test_compiled_graph_pre_product_errors_are_safe_over_http`；`tests/unit/test_multi_turn_workflow.py::test_persist_completes_before_first_product_and_exact_display_price_is_saved` |
+| HTTP/SSE 兼容及生成/保存失败顺序 | `tests/integration/test_chat_api.py::test_chat_stream_emits_start_products_text_and_end`、`test_generation_failure_after_products_is_partial`、`test_compiled_http_generation_failure_persists_candidates_for_follow_up_ordinal`、`test_compiled_graph_pre_product_errors_are_safe_over_http`；`tests/unit/test_multi_turn_workflow.py::test_persist_completes_before_first_product_and_exact_display_price_is_saved` |
 
 ### Fresh 验证
 
-2026-07-26 在未设置 `RUN_LIVE_TESTS=1` 时执行：
+2026-07-26 最终修复与独立复审完成后，在未设置 `RUN_LIVE_TESTS=1` 时执行：
 
 ```powershell
-uv --cache-dir .uv-cache run pytest -q -p no:cacheprovider --basetemp <workspace-writable-task11-dir>
-# 383 passed, 1 skipped in 9.18s
+uv run pytest -q -p no:cacheprovider
+# 399 passed, 2 skipped in 15.88s
 
-uv --cache-dir .uv-cache run ruff check .
-# All checks passed!；扫描既有不可访问的 .pytest-task10-* 时另有 9 条“拒绝访问”warning
+uv run pytest -q -p no:cacheprovider -rs
+# 399 passed, 2 skipped in 13.70s
+# tests/integration/test_qdrant_store.py：本地 Qdrant 返回 502 Bad Gateway
+# tests/live/test_live_shopping_flow.py：未设置 RUN_LIVE_TESTS=1
 
-uv --cache-dir .uv-cache run mypy src scripts
+uv run ruff check .
+# All checks passed!
+
+uv run mypy src scripts
 # Success: no issues found in 39 source files
 ```
 
-跳过项仅为显式 opt-in 的 `tests/live/test_live_shopping_flow.py`。该 live 用例已经在任何
-索引或检索前加入五条真实结构化解析断言。安全前提检查得到
-`DASHSCOPE_API_KEY_SET=False`、`RUN_LIVE_TESTS_SET=False`，因此没有设置
-`RUN_LIVE_TESTS=1`、没有发起 DashScope 调用，也没有继续到 Qdrant readiness/index
-步骤。功能状态保持“开发中”，没有把未运行的外部服务验收写成成功。
+两个跳过项分别是本地 Qdrant 不可用的显式集成 skip，以及显式 opt-in 的 live 测试。
+该 live 用例已经在任何索引或检索前加入五条真实结构化解析断言。进程环境未设置
+`DASHSCOPE_API_KEY`；本地 `.env` 有非空设置，但未验证其有效性；
+`RUN_LIVE_TESTS` 未设置，且本地 Qdrant readiness 请求返回 `502 Bad Gateway`。因此
+没有设置 `RUN_LIVE_TESTS=1`、没有发起 DashScope live 调用，也没有执行 live 索引与
+检索。功能状态保持“开发中”，没有把两个 skip 或未运行的外部服务验收写成成功。
 
 ## 变更记录
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
+| 2026-07-26 | 修复澄清恢复、无显式商品指代、含条件换一批和引用品牌校验边界 | 保留已有查询快照与条件，避免 mutation 静默丢失，并将越界品牌纳入一次纠正与安全失败链路 |
 | 2026-07-26 | 接入生产多轮图、SQLite、定向商品问答并补充六组端到端验收与覆盖矩阵 | 同步 Tasks 1–11 的实际类名、节点、路径、状态与 fresh 验证证据 |
 | 2026-07-26 | 同步最终增量操作、商品问题、会话版本术语与精确相对价格规则 | 使批准文档与 Task 1 模型一致，并将 `[399, 459, 529]` 的“更贵”结果按 `max + Decimal("0.01")` 更正为 `529.01` |
 | 2026-07-26 | 创建多轮 Query 编译、最近候选指代、澄清恢复和 SQLite 会话设计 | 将多轮碎片表达编译为确定性查询，并与现有单轮检索和商品事实边界衔接 |

@@ -574,6 +574,11 @@ class DashScopeTurnQueryParser(_DashScopeChatGateway):
         context: TurnContext,
     ) -> TurnQuery:
         parsed = TurnQuery.model_validate_json(content)
+        reference = parsed.reference
+        if reference is not None and reference.kind == "brand":
+            brand = self._exact_string(reference.brand, "reference brand")
+            if self._brands and brand not in self._brands:
+                raise ValueError("reference brand must be an exact catalog value")
         category, sub_category = self._target_category_pair(parsed, context)
         if self._category_pairs and category is not None and sub_category is not None:
             if (category, sub_category) not in self._category_pairs:

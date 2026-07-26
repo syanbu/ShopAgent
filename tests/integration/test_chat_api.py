@@ -19,6 +19,7 @@ from tests.integration.api_fakes import (
     FakeReadinessProbe,
     FailingConversationRepository,
     FailingTurnQueryParser,
+    SequencedResponseGenerator,
     compiled_chat_dependencies,
     parse_sse,
     product_event,
@@ -146,6 +147,112 @@ async def test_generation_failure_after_products_is_partial(
         "retryable": True,
     }
     assert events[-1].data["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_generation_failure_persists_candidates_for_follow_up_ordinal(
+    tmp_path: Path,
+) -> None:
+    """A failure after emitted products must not discard the reference domain."""
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "第二个",
+                    "kind": "ordinal",
+                    "ordinal": 2,
+                },
+                "product_question": {"text": "第二个防水吗", "kind": "semantic"},
+            }
+        ),
+    ]
+    dependencies, parser, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=turns,
+        response_generator=SequencedResponseGenerator(
+            [
+                ServiceError("GENERATION_FAILED", "upstream failed", retryable=True),
+                "第二个商品的已验证说明",
+            ]
+        ),
+    )
+
+    async def fetch_product_chunks(product_id: str) -> list[EvidenceChunk]:
+        return [
+            EvidenceChunk(
+                chunk_id=f"{product_id}:summary",
+                point_id=f"point-{product_id}",
+                product_id=product_id,
+                chunk_type="product_summary",
+                text="已验证的商品知识。",
+                source_path=f"data/{product_id}.json",
+            )
+        ]
+
+    retrieval.fetch_product_chunks = fetch_product_chunks  # type: ignore[method-assign]
+
+    failed = await _post(
+        dependencies,
+        {"conversation_id": "generation-persistence", "message": "展示三款"},
+    )
+    followed_up = await _post(
+        dependencies,
+        {"conversation_id": "generation-persistence", "message": "第二个防水吗"},
+    )
+
+    failed_events = parse_sse(failed.text)
+    assert [event.name for event in failed_events] == [
+        "message_start",
+        "product",
+        "product",
+        "product",
+        "error",
+        "message_end",
+    ]
+    assert failed_events[-2].data == {
+        "code": "GENERATION_FAILED",
+        "message": "upstream failed",
+        "retryable": True,
+    }
+    assert failed_events[-1].data["status"] == "partial"
+
+    follow_up_events = parse_sse(followed_up.text)
+    assert [event.name for event in follow_up_events] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert follow_up_events[-1].data["status"] == "completed"
+    assert parser.contexts[1].recent_candidates[1].product_id == "p2"
+    assert parser.contexts[1].focused_product_id is None
+    assert len(retrieval.calls) == 1
+    saved = await repository.load("generation-persistence")
+    assert saved is not None
+    assert saved.version == 2
+    assert saved.state.focused_product_id == "p2"
+    assert [item.product_id for item in saved.state.recent_candidates] == [
+        "p1",
+        "p2",
+        "p3",
+    ]
+    assert saved.state.seen_product_ids == ["p1", "p2", "p3"]
 
 
 @pytest.mark.asyncio

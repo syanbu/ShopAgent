@@ -864,7 +864,7 @@ def test_more_results_preserves_snapshot_candidates_focus_and_seen_ids(
     _assert_input_unchanged(state, before)
 
 
-def test_plain_more_results_ignores_turn_slot_operations(
+def test_more_results_with_price_operation_becomes_refinement(
     catalog: ProductCatalog,
 ) -> None:
     snapshot = QuerySnapshot(
@@ -889,8 +889,65 @@ def test_plain_more_results_ignores_turn_slot_operations(
         catalog,
     )
 
-    assert result.intent == "more_results"
-    assert result.snapshot == snapshot
+    assert result.intent == "refine_search"
+    assert result.snapshot is not None
+    assert result.snapshot.constraints.max_price == 100
+    assert result.state.recent_candidates == []
+    assert result.state.focused_product_id is None
+    assert result.state.seen_product_ids == []
+
+
+def test_more_results_with_semantic_operation_becomes_refinement(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(
+            category="数码电子",
+            sub_category="智能手机",
+            semantic_terms=["通勤"],
+        ),
+        recent=[_candidate("phone-xiaomi-512", 1, 459)],
+        focus="phone-xiaomi-512",
+    )
+
+    result = merge_turn_query(
+        _turn(
+            "more_results",
+            semantic_term_operations=[{"operation": "add", "value": "拍照"}],
+        ),
+        state,
+        catalog,
+    )
+
+    assert result.intent == "refine_search"
+    assert result.snapshot is not None
+    assert result.snapshot.semantic_terms == ["通勤", "拍照"]
+    assert result.state.recent_candidates == []
+    assert result.state.seen_product_ids == []
+
+
+def test_more_results_with_relative_price_becomes_refinement(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(category="数码电子", sub_category="智能手机"),
+        recent=[
+            _candidate("phone-xiaomi-512", 1, 459),
+            _candidate("phone-xiaomi-1tb", 2, 529),
+        ],
+    )
+
+    result = merge_turn_query(
+        _turn("more_results", relative_price="cheaper"),
+        state,
+        catalog,
+    )
+
+    assert result.intent == "refine_search"
+    assert result.snapshot is not None
+    assert result.snapshot.constraints.max_price == 458.99
+    assert result.state.recent_candidates == []
+    assert result.state.seen_product_ids == []
 
 
 def test_resolved_brand_is_included_and_removed_from_exclusions(

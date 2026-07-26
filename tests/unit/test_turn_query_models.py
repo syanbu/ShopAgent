@@ -189,6 +189,27 @@ def test_semantic_term_operation_requires_the_correct_value_contract(
         SemanticTermOperation.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"operation": "add", "value": ""},
+        {"operation": "add", "value": "   "},
+        {"operation": "remove", "value": "\t"},
+    ],
+)
+def test_semantic_term_add_and_remove_reject_blank_values(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        SemanticTermOperation.model_validate(payload)
+
+
+def test_semantic_term_add_strips_surrounding_whitespace() -> None:
+    operation = SemanticTermOperation(operation="add", value="  通勤  ")
+
+    assert operation.value == "通勤"
+
+
 def test_turn_query_rejects_conflicting_slot_operations() -> None:
     with pytest.raises(ValidationError):
         TurnQuery(

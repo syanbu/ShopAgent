@@ -268,6 +268,16 @@ async def _assert_live_turn_query_parser_contracts(
     assert budget_result.snapshot.constraints.max_price == 300
 
     exclude = await parser.parse("不要小米了", context)
+    brand_mutations = [
+        (operation.slot, operation.operation, operation.value)
+        for operation in exclude.slot_operations
+        if operation.slot
+        in {"constraints.exclude_brands", "constraints.include_brands"}
+    ]
+    assert brand_mutations in (
+        [("constraints.exclude_brands", "add", "小米")],
+        [("constraints.include_brands", "remove", "小米")],
+    )
     exclude_result = merge_turn_query(exclude, state, catalog)
     assert exclude_result.needs_clarification is False
     assert exclude_result.snapshot is not None

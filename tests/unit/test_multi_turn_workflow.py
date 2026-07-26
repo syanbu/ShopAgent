@@ -304,6 +304,21 @@ def _assert_acceptance_product_question(
     assert observation.response_count == 1
 
 
+def _assert_acceptance_persisted_state(
+    observation: AcceptanceTurnObservation,
+    *,
+    snapshot: QuerySnapshot,
+    recent_candidates: list[CandidateReference],
+    focused_product_id: str | None,
+    seen_product_ids: list[str],
+) -> None:
+    """Assert hand-authored persisted state without deriving expected values."""
+    assert observation.state.query_snapshot == snapshot
+    assert observation.state.recent_candidates == recent_candidates
+    assert observation.state.focused_product_id == focused_product_id
+    assert observation.state.seen_product_ids == seen_product_ids
+
+
 @pytest.mark.asyncio
 async def test_acceptance_running_shoes_refinements_retain_feature_and_budget(
     tmp_path: Path,
@@ -354,15 +369,13 @@ async def test_acceptance_running_shoes_refinements_retain_feature_and_budget(
     second = await _observe_acceptance_turn(graph, harness, repository, "要轻量的")
     third = await _observe_acceptance_turn(graph, harness, repository, "预算500以内")
 
+    expected_candidates = [
+        CandidateReference(rank=1, product_id="p1", display_price=100),
+        CandidateReference(rank=2, product_id="p2", display_price=101),
+        CandidateReference(rank=3, product_id="p3", display_price=102),
+    ]
     for observation in (first, second, third):
         _assert_acceptance_search_turn(observation, ("p1", "p2", "p3"))
-        assert observation.state.recent_candidates == [
-            CandidateReference(rank=1, product_id="p1", display_price=100),
-            CandidateReference(rank=2, product_id="p2", display_price=101),
-            CandidateReference(rank=3, product_id="p3", display_price=102),
-        ]
-        assert observation.state.seen_product_ids == ["p1", "p2", "p3"]
-        assert observation.state.focused_product_id is None
         assert observation.retrieve_calls[0].excluded_product_ids == ()
     assert [first.version, second.version, third.version] == [1, 2, 3]
     assert first.state.query_snapshot == QuerySnapshot(
@@ -378,6 +391,35 @@ async def test_acceptance_running_shoes_refinements_retain_feature_and_budget(
         category="服饰运动",
         sub_category="跑步鞋",
         constraints=SearchConstraints(max_price=500, required_features=["轻量"]),
+    )
+    _assert_acceptance_persisted_state(
+        first,
+        snapshot=QuerySnapshot(category="服饰运动", sub_category="跑步鞋"),
+        recent_candidates=expected_candidates,
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        second,
+        snapshot=QuerySnapshot(
+            category="服饰运动",
+            sub_category="跑步鞋",
+            constraints=SearchConstraints(required_features=["轻量"]),
+        ),
+        recent_candidates=expected_candidates,
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        third,
+        snapshot=QuerySnapshot(
+            category="服饰运动",
+            sub_category="跑步鞋",
+            constraints=SearchConstraints(max_price=500, required_features=["轻量"]),
+        ),
+        recent_candidates=expected_candidates,
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
     )
     assert second.retrieve_calls[0].intent.constraints.required_features == ["轻量"]
     assert third.retrieve_calls[0].intent.constraints == SearchConstraints(
@@ -423,6 +465,33 @@ async def test_acceptance_ordinal_question_sets_focus_and_pronoun_reuses_it(
     _assert_acceptance_product_question(ordinal, "p2")
     _assert_acceptance_product_question(pronoun, "p2")
     assert [displayed.version, ordinal.version, pronoun.version] == [1, 2, 3]
+    expected_snapshot = QuerySnapshot(category="数码电子", sub_category="蓝牙耳机")
+    expected_candidates = [
+        CandidateReference(rank=1, product_id="p1", display_price=100),
+        CandidateReference(rank=2, product_id="p2", display_price=101),
+        CandidateReference(rank=3, product_id="p3", display_price=102),
+    ]
+    _assert_acceptance_persisted_state(
+        displayed,
+        snapshot=expected_snapshot,
+        recent_candidates=expected_candidates,
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        ordinal,
+        snapshot=expected_snapshot,
+        recent_candidates=expected_candidates,
+        focused_product_id="p2",
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        pronoun,
+        snapshot=expected_snapshot,
+        recent_candidates=expected_candidates,
+        focused_product_id="p2",
+        seen_product_ids=["p1", "p2", "p3"],
+    )
     for observation in (ordinal, pronoun):
         assert observation.state.query_snapshot == displayed.state.query_snapshot
         assert observation.state.recent_candidates == displayed.state.recent_candidates
@@ -491,6 +560,33 @@ async def test_acceptance_ambiguous_question_persists_and_answer_resumes_p2(
     assert resumed.state.recent_candidates == displayed.state.recent_candidates
     assert resumed.state.seen_product_ids == displayed.state.seen_product_ids
     assert [displayed.version, ambiguous.version, resumed.version] == [1, 2, 3]
+    expected_snapshot = QuerySnapshot(category="数码电子", sub_category="蓝牙耳机")
+    expected_candidates = [
+        CandidateReference(rank=1, product_id="p1", display_price=100),
+        CandidateReference(rank=2, product_id="p2", display_price=101),
+        CandidateReference(rank=3, product_id="p3", display_price=102),
+    ]
+    _assert_acceptance_persisted_state(
+        displayed,
+        snapshot=expected_snapshot,
+        recent_candidates=expected_candidates,
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        ambiguous,
+        snapshot=expected_snapshot,
+        recent_candidates=expected_candidates,
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        resumed,
+        snapshot=expected_snapshot,
+        recent_candidates=expected_candidates,
+        focused_product_id="p2",
+        seen_product_ids=["p1", "p2", "p3"],
+    )
 
 
 @pytest.mark.asyncio
@@ -568,6 +664,37 @@ async def test_acceptance_category_switch_resets_old_query_and_display_state(
     assert phones.state.query_snapshot.constraints.max_price is None
     assert phones.state.query_snapshot.constraints.required_features == []
     assert phones.state.query_snapshot.constraints.sku_constraints == {}
+    _assert_acceptance_persisted_state(
+        earphones,
+        snapshot=QuerySnapshot(
+            category="数码电子",
+            sub_category="蓝牙耳机",
+            semantic_terms=["旧场景"],
+            constraints=SearchConstraints(
+                max_price=500,
+                required_features=["旧功能"],
+                sku_constraints={"color": ["黑色"]},
+            ),
+        ),
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p1", display_price=100),
+            CandidateReference(rank=2, product_id="p2", display_price=101),
+            CandidateReference(rank=3, product_id="p3", display_price=102),
+        ],
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        phones,
+        snapshot=QuerySnapshot(category="数码电子", sub_category="智能手机"),
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p4", display_price=103),
+            CandidateReference(rank=2, product_id="p5", display_price=104),
+            CandidateReference(rank=3, product_id="p6", display_price=105),
+        ],
+        focused_product_id=None,
+        seen_product_ids=["p4", "p5", "p6"],
+    )
 
 
 @pytest.mark.asyncio
@@ -616,6 +743,28 @@ async def test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent(
     )
     assert cheaper.state.recent_candidates == []
     assert cheaper.state.seen_product_ids == []
+    _assert_acceptance_persisted_state(
+        displayed,
+        snapshot=QuerySnapshot(category="数码电子", sub_category="蓝牙耳机"),
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p1", display_price=399),
+            CandidateReference(rank=2, product_id="p2", display_price=459),
+            CandidateReference(rank=3, product_id="p3", display_price=529),
+        ],
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        cheaper,
+        snapshot=QuerySnapshot(
+            category="数码电子",
+            sub_category="蓝牙耳机",
+            constraints=SearchConstraints(max_price=398.99),
+        ),
+        recent_candidates=[],
+        focused_product_id=None,
+        seen_product_ids=[],
+    )
 
 
 @pytest.mark.asyncio
@@ -676,6 +825,51 @@ async def test_acceptance_more_batches_accumulate_seen_and_final_ordinal_targets
     assert ordinal.state.seen_product_ids == ghi.state.seen_product_ids
     assert ordinal.state.focused_product_id == "p8"
     assert ordinal.focused_fetches == ("p8",)
+    snapshot = QuerySnapshot(category="数码电子", sub_category="蓝牙耳机")
+    _assert_acceptance_persisted_state(
+        abc,
+        snapshot=snapshot,
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p1", display_price=100),
+            CandidateReference(rank=2, product_id="p2", display_price=101),
+            CandidateReference(rank=3, product_id="p3", display_price=102),
+        ],
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3"],
+    )
+    _assert_acceptance_persisted_state(
+        def_batch,
+        snapshot=snapshot,
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p4", display_price=103),
+            CandidateReference(rank=2, product_id="p5", display_price=104),
+            CandidateReference(rank=3, product_id="p6", display_price=105),
+        ],
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3", "p4", "p5", "p6"],
+    )
+    _assert_acceptance_persisted_state(
+        ghi,
+        snapshot=snapshot,
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p7", display_price=106),
+            CandidateReference(rank=2, product_id="p8", display_price=107),
+            CandidateReference(rank=3, product_id="p9", display_price=108),
+        ],
+        focused_product_id=None,
+        seen_product_ids=["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"],
+    )
+    _assert_acceptance_persisted_state(
+        ordinal,
+        snapshot=snapshot,
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p7", display_price=106),
+            CandidateReference(rank=2, product_id="p8", display_price=107),
+            CandidateReference(rank=3, product_id="p9", display_price=108),
+        ],
+        focused_product_id="p8",
+        seen_product_ids=["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"],
+    )
 
 
 @pytest.mark.asyncio
@@ -1534,6 +1728,199 @@ async def test_second_unresolved_attempt_clears_pending_and_requests_complete_re
     assert harness.response.prompts == []
 
 
+@pytest.mark.asyncio
+async def test_reference_less_product_question_uses_focused_product(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    repository = FakeConversationRepository(
+        ConversationRecord(state=_conversation(focus="p2"), version=3)
+    )
+    parser = FakeTurnQueryParser(
+        [_turn("product_question", question=_semantic_question())]
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "它防水吗",
+    )
+
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.retrieval.fetch_product_calls == ["p2"]
+    assert repository.record is not None
+    assert repository.record.state.focused_product_id == "p2"
+    assert [part["data"]["event"] for part in events] == [
+        "text_delta",
+        "text_delta",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reference_less_product_question_uses_only_recent_candidate(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    stored = _conversation().model_copy(
+        update={
+            "recent_candidates": [
+                CandidateReference(rank=1, product_id="p1", display_price=400)
+            ],
+            "focused_product_id": None,
+            "seen_product_ids": ["p1"],
+        },
+        deep=True,
+    )
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=3)
+    )
+    parser = FakeTurnQueryParser(
+        [_turn("product_question", question=_semantic_question())]
+    )
+
+    await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "这款防水吗",
+    )
+
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.retrieval.fetch_product_calls == ["p1"]
+    assert repository.record is not None
+    assert repository.record.state.focused_product_id == "p1"
+
+
+@pytest.mark.asyncio
+async def test_reference_less_product_question_with_multiple_candidates_clarifies(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    repository = FakeConversationRepository(
+        ConversationRecord(state=_conversation(), version=3)
+    )
+    parser = FakeTurnQueryParser(
+        [_turn("product_question", question=_semantic_question())]
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "防水吗",
+    )
+
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.retrieval.fetch_product_calls == []
+    assert repository.record is not None
+    pending = repository.record.state.pending_clarification
+    assert pending is not None
+    assert pending.kind == "ambiguous_reference"
+    assert pending.suspended_turn_query.reference is None
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_pending_answer_without_reference_exits_attempt_limit(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    repository = FakeConversationRepository(
+        ConversationRecord(state=_conversation(pending=_pending()), version=5)
+    )
+    parser = FakeTurnQueryParser([_turn("clarification_answer")])
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "还是那个",
+    )
+
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert "重新完整描述" in events[0]["data"]["data"]["delta"]
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.retrieval.fetch_product_calls == []
+    assert repository.record is not None
+    assert repository.record.state.pending_clarification is None
+
+
+@pytest.mark.asyncio
+async def test_missing_price_baseline_answer_preserves_existing_snapshot_and_retrieves(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path, price_start=99)
+    stored = ConversationState(
+        schema_version=1,
+        conversation_id="conversation-fixed",
+        query_snapshot=QuerySnapshot(
+            category="数码电子",
+            sub_category="蓝牙耳机",
+            semantic_terms=["通勤"],
+            constraints=SearchConstraints(
+                max_price=500,
+                required_features=["佩戴舒适"],
+            ),
+        ),
+    )
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=2)
+    )
+    relative_turn = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "refine_search",
+            "relative_price": "cheaper",
+        }
+    )
+
+    first_events = await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser([relative_turn]),
+            repository,
+        ),
+        "再便宜一点",
+    )
+
+    assert [part["data"]["event"] for part in first_events] == ["text_delta"]
+    assert harness.retrieval.retrieve_calls == []
+    assert repository.record is not None
+    pending = repository.record.state.pending_clarification
+    assert pending is not None
+    assert pending.kind == "missing_context"
+    assert repository.record.state.query_snapshot == stored.query_snapshot
+
+    answer = _search_turn(
+        "clarification_answer",
+        [
+            {
+                "slot": "constraints.max_price",
+                "operation": "replace",
+                "value": 300,
+            }
+        ],
+    )
+    await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser([answer]),
+            repository,
+        ),
+        "预算 300 元",
+    )
+
+    call = harness.retrieval.retrieve_calls[0]
+    assert call.excluded_product_ids == ()
+    assert call.intent.category == "数码电子"
+    assert call.intent.sub_category == "蓝牙耳机"
+    assert call.intent.constraints.max_price == 300
+    assert call.intent.constraints.required_features == ["佩戴舒适"]
+    assert "通勤" in (call.intent.retrieval_query or "")
+    assert repository.record is not None
+    snapshot = repository.record.state.query_snapshot
+    assert snapshot is not None
+    assert snapshot.category == "数码电子"
+    assert snapshot.sub_category == "蓝牙耳机"
+    assert snapshot.semantic_terms == ["通勤"]
+    assert snapshot.constraints.max_price == 300
+    assert snapshot.constraints.required_features == ["佩戴舒适"]
+    assert repository.record.state.pending_clarification is None
+
+
 @pytest.mark.parametrize(
     ("reference", "field", "value"),
     [
@@ -1768,6 +2155,77 @@ async def test_more_results_excludes_all_seen_and_appends_exact_new_batch(
     ]
 
 
+@pytest.mark.parametrize(
+    ("turn_payload", "expected_terms", "expected_max_price"),
+    [
+        (
+            {
+                "semantic_term_operations": [
+                    {"operation": "add", "value": "轻量"}
+                ]
+            },
+            ["通勤", "轻量"],
+            500,
+        ),
+        (
+            {
+                "slot_operations": [
+                    {
+                        "slot": "constraints.max_price",
+                        "operation": "replace",
+                        "value": 300,
+                    }
+                ]
+            },
+            ["通勤"],
+            300,
+        ),
+        (
+            {"relative_price": "cheaper"},
+            ["通勤"],
+            399.99,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_more_results_with_query_mutation_refines_from_full_catalog(
+    tmp_path: Path,
+    turn_payload: dict[str, object],
+    expected_terms: list[str],
+    expected_max_price: float,
+) -> None:
+    harness = build_harness(tmp_path, price_start=99)
+    repository = FakeConversationRepository(
+        ConversationRecord(state=_conversation(), version=4)
+    )
+    parser = FakeTurnQueryParser(
+        [
+            TurnQuery.model_validate(
+                {
+                    "schema_version": 1,
+                    "intent": "more_results",
+                    **turn_payload,
+                }
+            )
+        ]
+    )
+
+    await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "换一批并修改条件",
+    )
+
+    call = harness.retrieval.retrieve_calls[0]
+    assert call.excluded_product_ids == ()
+    assert call.intent.constraints.max_price == expected_max_price
+    assert repository.record is not None
+    snapshot = repository.record.state.query_snapshot
+    assert snapshot is not None
+    assert snapshot.semantic_terms == expected_terms
+    assert snapshot.constraints.max_price == expected_max_price
+    assert repository.record.state.seen_product_ids == ["p1", "p2", "p3"]
+
+
 @pytest.mark.asyncio
 async def test_more_results_with_resolved_brand_refines_without_seen_exclusions(
     tmp_path: Path,
@@ -1860,7 +2318,7 @@ async def test_category_switch_drops_old_constraints_focus_and_seen(
             CandidateReference(rank=index, product_id=f"p{index}", display_price=99 + index)
             for index in range(1, 4)
         ],
-        focused_product_id="p2",
+        focused_product_id=None,
         seen_product_ids=["p1", "p2", "p3"],
     )
     repository = FakeConversationRepository(ConversationRecord(state=old, version=4))

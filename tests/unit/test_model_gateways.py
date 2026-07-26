@@ -479,6 +479,90 @@ async def test_turn_query_parser_corrects_taxonomy_output_and_accepts_exact_valu
 
 
 @pytest.mark.asyncio
+async def test_turn_query_parser_corrects_invalid_reference_brand(
+    settings: Settings,
+) -> None:
+    def response(brand: str) -> SimpleNamespace:
+        return _chat_response(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "intent": "product_question",
+                    "reference": {
+                        "target_type": "product",
+                        "surface_text": "那个苹果的",
+                        "kind": "brand",
+                        "brand": brand,
+                    },
+                    "product_question": {
+                        "text": "那个苹果的怎么样",
+                        "kind": "semantic",
+                        "field": None,
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    create = AsyncMock(
+        side_effect=[response("苹果"), response("Apple 苹果")]
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _turn_parser(settings, client).parse(
+        "那个苹果的怎么样",
+        _turn_context(),
+    )
+
+    assert result.reference is not None
+    assert result.reference.brand == "Apple 苹果"
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_normalizes_twice_invalid_reference_brand(
+    settings: Settings,
+) -> None:
+    invalid = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "那个苹果的",
+                    "kind": "brand",
+                    "brand": "不存在品牌",
+                },
+                "product_question": {
+                    "text": "那个苹果的怎么样",
+                    "kind": "semantic",
+                    "field": None,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(side_effect=[invalid, invalid])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        await _turn_parser(settings, client).parse(
+            "那个苹果的怎么样",
+            _turn_context(),
+        )
+
+    assert caught.value.code == "TURN_QUERY_PARSE_FAILED"
+    assert caught.value.retryable is True
+    assert "不存在品牌" not in caught.value.message
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_turn_query_parser_keeps_demonstrative_as_unresolved_clue(
     settings: Settings,
 ) -> None:

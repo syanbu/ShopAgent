@@ -60,31 +60,13 @@ def merge_turn_query(
     except _ClarificationNeeded as error:
         return _clarification_result(intent, base_state, None, str(error))
 
-    if intent == "more_results" and resolved_brand is None:
-        try:
-            snapshot = _validated_snapshot(base_snapshot, catalog)
-        except (ValidationError, _ClarificationNeeded):
-            return _clarification_result(
-                intent,
-                base_state,
-                base_snapshot,
-                INVALID_CONDITION_MESSAGE,
-            )
-        next_state = _update_search_state(base_state, snapshot, intent)
-        return QueryMergeResult(
-            intent=intent,
-            state=next_state,
-            snapshot=snapshot,
-            parsed_intent=snapshot.to_parsed_intent(),
-        )
-
     try:
         intent = _resolve_search_intent(turn, base_snapshot, base_state, catalog)
+        if intent == "more_results" and _has_query_mutation(turn, resolved_brand):
+            intent = "refine_search"
         operation_base = QuerySnapshot() if intent == "switch_category" else base_snapshot
         snapshot = _compile_operations(operation_base, turn, catalog)
         snapshot = _apply_resolved_brand(snapshot, turn, resolved_brand)
-        if intent == "more_results" and resolved_brand is not None:
-            intent = "refine_search"
         snapshot = _apply_relative_price(
             snapshot,
             turn,
@@ -126,6 +108,15 @@ def _search_intent(turn: TurnQuery) -> SearchIntent:
     }:
         raise ValueError(f"turn intent {turn.intent!r} is not a search intent")
     return cast(SearchIntent, turn.intent)
+
+
+def _has_query_mutation(turn: TurnQuery, resolved_brand: str | None) -> bool:
+    return bool(
+        turn.semantic_term_operations
+        or turn.slot_operations
+        or turn.relative_price is not None
+        or resolved_brand is not None
+    )
 
 
 def _compile_operations(

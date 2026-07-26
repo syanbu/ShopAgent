@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shop_agent.models.query import CanonicalSkuKey, NumericConstraint
 
@@ -106,11 +106,16 @@ class SemanticTermOperation(BaseModel):
     operation: Literal["add", "remove", "clear"]
     value: str | None = None
 
+    @field_validator("value")
+    @classmethod
+    def strip_value(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
     @model_validator(mode="after")
     def validate_value(self) -> "SemanticTermOperation":
         if self.operation == "clear" and self.value is not None:
             raise ValueError("clear semantic operations cannot include a value")
-        if self.operation != "clear" and self.value is None:
+        if self.operation != "clear" and not self.value:
             raise ValueError("semantic add and remove operations require a value")
         return self
 

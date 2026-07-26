@@ -19,6 +19,7 @@ from shop_agent.models.retrieval import EvidenceChunk, RetrievedChunk, SelectedP
 from shop_agent.models.state import ShoppingState
 from shop_agent.models.turn_query import (
     ProductQuestion,
+    ProductReference,
     SlotOperation,
     TurnCandidateSummary,
     TurnQuery,
@@ -211,7 +212,11 @@ class WorkflowNodes:
             }
 
         if turn.intent == "clarification_answer":
-            restored = _merge_pending_turn(pending, turn)
+            restored = _merge_pending_turn(
+                pending,
+                turn,
+                has_query_snapshot=conversation.query_snapshot is not None,
+            )
             if restored is None:
                 saved = await repository.save(
                     cleared,
@@ -250,6 +255,15 @@ class WorkflowNodes:
         turn = state["turn_query"]
         conversation = state["conversation_state"]
         reference = turn.reference
+        if reference is None and turn.intent == "product_question":
+            question = turn.product_question
+            if question is None:
+                raise _product_knowledge_error()
+            reference = ProductReference(
+                target_type="product",
+                surface_text=question.text,
+                kind="demonstrative",
+            )
         if reference is None:
             resolution = ReferenceResolution()
             updates: dict[str, object] = {}
@@ -796,13 +810,19 @@ def _loaded_pending(state: ShoppingState) -> PendingClarification | None:
 def _merge_pending_turn(
     pending: PendingClarification,
     answer: TurnQuery,
+    *,
+    has_query_snapshot: bool = False,
 ) -> TurnQuery | None:
     suspended = pending.suspended_turn_query
     if pending.kind == "ambiguous_reference":
         reference = (
             answer.reference.model_copy(deep=True)
             if answer.reference is not None
-            else None
+            else (
+                suspended.reference.model_copy(deep=True)
+                if suspended.reference is not None
+                else None
+            )
         )
         return TurnQuery.model_validate(
             suspended.model_copy(
@@ -834,7 +854,11 @@ def _merge_pending_turn(
             seen_semantic.add(key)
             semantic_operations.append(item.model_copy(deep=True))
 
-    intent = "new_search" if pending.kind == "missing_context" else suspended.intent
+    intent = (
+        "new_search"
+        if pending.kind == "missing_context" and not has_query_snapshot
+        else suspended.intent
+    )
     update: dict[str, object] = {
         "intent": intent,
         "slot_operations": slot_operations,

@@ -284,12 +284,26 @@ class DeterministicResponseGenerator:
         yield "测试回复"
 
 
+class SequencedResponseGenerator:
+    """Test-only response outcomes for exercising post-product failures."""
+
+    def __init__(self, outcomes: Sequence[str | ServiceError]) -> None:
+        self._outcomes = iter(outcomes)
+
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
+        outcome = next(self._outcomes)
+        if isinstance(outcome, ServiceError):
+            raise outcome
+        yield outcome
+
+
 def compiled_chat_dependencies(
     tmp_path: Path,
     *,
     turns: Sequence[TurnQuery] = (),
     parser: TurnQueryParser | None = None,
     repository: ConversationRepository | None = None,
+    response_generator: DeterministicResponseGenerator | SequencedResponseGenerator | None = None,
 ) -> tuple[
     ApiDependencies,
     SequencedTurnQueryParser,
@@ -315,7 +329,7 @@ def compiled_chat_dependencies(
             conversation_repository=repository or sqlite_repository,
             retrieval_service=retrieval,
             evidence_service=evidence,
-            response_generator=DeterministicResponseGenerator(),
+            response_generator=response_generator or DeterministicResponseGenerator(),
             catalog=catalog,
             settings=settings,
         )
