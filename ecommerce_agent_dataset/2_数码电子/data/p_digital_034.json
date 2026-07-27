@@ -1,0 +1,29 @@
+{
+  "product_id": "p_digital_034",
+  "title": "Samsung Galaxy Buds4 Pro 智能降噪真无线蓝牙耳机",
+  "brand": "Samsung 三星",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 1499.0,
+  "image_path": "2_数码电子/images/p_digital_034_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_034_1", "properties": {"版本": "标准版", "颜色": "星雾紫"}, "price": 1499.0},
+    {"sku_id": "s_p_digital_034_2", "properties": {"版本": "标准版", "颜色": "云岩白"}, "price": 1499.0},
+    {"sku_id": "s_p_digital_034_3", "properties": {"版本": "标准版", "颜色": "钛灰色"}, "price": 1499.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "Samsung Galaxy Buds4 Pro 是一款 mock 真无线蓝牙耳机，支持智能主动降噪、对话检测和环绕音频。耳机会根据持续环境噪声调整降噪强度，并可在检测到用户说话时临时降低音量。单次播放约 7 小时，搭配充电盒约 29 小时。环绕音频和无缝切换在兼容的同品牌设备上体验更完整，其他蓝牙设备可使用基础功能。",
+    "official_faq": [
+      {"question": "对话检测会不会经常误触发？", "answer": "说话时会自动降低音量，哼唱或咳嗽偶尔可能触发，可在配套应用中关闭或调整检测灵敏度。"},
+      {"question": "可以连接苹果手机吗？", "answer": "可以使用标准蓝牙进行播放和通话，但环绕音频、设备无缝切换等功能可能受限。"},
+      {"question": "充电盒支持无线充电吗？", "answer": "支持兼容的 Qi 无线充电板，也可以通过 USB-C 接口充电。"}
+    ],
+    "user_reviews": [
+      {"nickname": "紫苏", "rating": 5, "content": "星雾紫很特别，对话检测在便利店结账时很好用，不用手动摘耳机。"},
+      {"nickname": "阿哲", "rating": 4, "content": "搭配同品牌手机连接顺畅，环绕音频看电影有明显方向感。"},
+      {"nickname": "莫莫", "rating": 3, "content": "我跟着音乐哼唱时会触发对话模式，调低灵敏度后改善不少。"},
+      {"nickname": "夏至", "rating": 5, "content": "降噪和通透切换自然，充电盒支持无线充电，日常桌面使用方便。"},
+      {"nickname": "乔木", "rating": 2, "content": "连接其他品牌手机能听歌，但高级功能少了一些，性价比会打折。"}
+    ]
+  }
+}

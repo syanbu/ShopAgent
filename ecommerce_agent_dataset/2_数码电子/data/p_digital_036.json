@@ -1,0 +1,32 @@
+{
+  "product_id": "p_digital_036",
+  "title": "OnePlus Buds Pro 4 低延迟高解析真无线蓝牙耳机",
+  "brand": "一加 OnePlus",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 899.0,
+  "image_path": "2_数码电子/images/p_digital_036_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_036_1", "properties": {"版本": "标准版", "颜色": "森岭绿"}, "price": 899.0},
+    {"sku_id": "s_p_digital_036_2", "properties": {"版本": "标准版", "颜色": "云峰白"}, "price": 899.0},
+    {"sku_id": "s_p_digital_036_3", "properties": {"版本": "标准版", "颜色": "曜岩黑"}, "price": 899.0},
+    {"sku_id": "s_p_digital_036_4", "properties": {"版本": "电竞低延迟版", "颜色": "森岭绿"}, "price": 1099.0},
+    {"sku_id": "s_p_digital_036_5", "properties": {"版本": "电竞低延迟版", "颜色": "云峰白"}, "price": 1099.0},
+    {"sku_id": "s_p_digital_036_6", "properties": {"版本": "电竞低延迟版", "颜色": "曜岩黑"}, "price": 1099.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "OnePlus Buds Pro 4 是一款 mock 入耳式真无线耳机，主打高解析音频、主动降噪和游戏低延迟。标准版适合通勤与音乐，电竞低延迟版增加专用低延迟连接模式。单次播放约 7.5 小时，搭配充电盒约 34 小时，支持快速补电。专用低延迟模式需要兼容手机，开启后功耗会高于普通蓝牙模式。",
+    "official_faq": [
+      {"question": "电竞低延迟版与标准版音质不同吗？", "answer": "两者使用相同声学单元，电竞版主要增加专用低延迟连接模式，普通音乐播放的调音一致。"},
+      {"question": "高解析模式是否影响续航？", "answer": "高解析编码传输的数据更多，开启后单次续航会缩短，具体时长取决于音量和降噪档位。"},
+      {"question": "耳机能防水吗？", "answer": "可以应对健身汗水和小雨，但充电盒不适合沾水，耳机也不能用于游泳。"}
+    ],
+    "user_reviews": [
+      {"nickname": "青禾", "rating": 5, "content": "森岭绿很有辨识度，电竞模式玩射击游戏时脚步声和画面同步得不错。"},
+      {"nickname": "Leon", "rating": 4, "content": "低频有力度但不混，高解析模式细节更多，只是电量掉得更快。"},
+      {"nickname": "小鱼", "rating": 3, "content": "标准蓝牙连接稳定，专用低延迟在我的旧手机上无法开启。"},
+      {"nickname": "十三", "rating": 5, "content": "快充十几分钟就够一段通勤，耳机柄按压操作比轻触更少误触。"},
+      {"nickname": "默默", "rating": 2, "content": "降噪对公交低频有效，但在风大的户外会听到一些风噪。"}
+    ]
+  }
+}

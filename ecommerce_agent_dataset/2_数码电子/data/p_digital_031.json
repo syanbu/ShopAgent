@@ -1,0 +1,32 @@
+{
+  "product_id": "p_digital_031",
+  "title": "vivo TWS 5 Pro 空间音频低延迟真无线蓝牙耳机",
+  "brand": "vivo",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 899.0,
+  "image_path": "2_数码电子/images/p_digital_031_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_031_1", "properties": {"版本": "标准版", "颜色": "深海蓝"}, "price": 899.0},
+    {"sku_id": "s_p_digital_031_2", "properties": {"版本": "标准版", "颜色": "云纱白"}, "price": 899.0},
+    {"sku_id": "s_p_digital_031_3", "properties": {"版本": "标准版", "颜色": "星夜黑"}, "price": 899.0},
+    {"sku_id": "s_p_digital_031_4", "properties": {"版本": "空间音频版", "颜色": "深海蓝"}, "price": 1099.0},
+    {"sku_id": "s_p_digital_031_5", "properties": {"版本": "空间音频版", "颜色": "云纱白"}, "price": 1099.0},
+    {"sku_id": "s_p_digital_031_6", "properties": {"版本": "空间音频版", "颜色": "星夜黑"}, "price": 1099.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "vivo TWS 5 Pro 是一款 mock 真无线耳机，主打低延迟、空间音频和轻量佩戴。标准模式单次续航约 8 小时，搭配充电盒约 36 小时；游戏模式可降低音画延迟。空间音频版增加头部追踪功能，适合看电影和现场录音。空间音频与超低延迟需要兼容设备，复杂户外环境下通话效果会受到风噪影响。",
+    "official_faq": [
+      {"question": "游戏低延迟模式支持所有手机吗？", "answer": "普通蓝牙设备均可连接，但最低延迟模式需要兼容设备和对应应用支持，实际延迟也会受游戏影响。"},
+      {"question": "空间音频版有什么额外功能？", "answer": "空间音频版支持头部追踪，可让声场随头部动作调整；标准版支持普通空间声场但不提供头部追踪。"},
+      {"question": "可以同时连接电脑和手机吗？", "answer": "支持双设备连接，可在电脑媒体和手机来电之间切换，切换速度取决于设备蓝牙实现。"}
+    ],
+    "user_reviews": [
+      {"nickname": "蓝鲸", "rating": 5, "content": "深海蓝很有质感，打节奏游戏时声音跟手，日常听歌佩戴也轻。"},
+      {"nickname": "西米", "rating": 4, "content": "双设备切换对办公很实用，开空间音频看电影包围感不错。"},
+      {"nickname": "阿洲", "rating": 3, "content": "室内通话清楚，骑车遇到大风时对方还是能听到一些风声。"},
+      {"nickname": "晴晴", "rating": 5, "content": "连续戴两个小时耳朵没有明显压迫，充电盒也比较小巧。"},
+      {"nickname": "Niko", "rating": 2, "content": "在非兼容手机上无法开启最低延迟，买之前应该先确认设备支持列表。"}
+    ]
+  }
+}

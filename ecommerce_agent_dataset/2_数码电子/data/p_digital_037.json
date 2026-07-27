@@ -1,0 +1,32 @@
+{
+  "product_id": "p_digital_037",
+  "title": "Redmi Buds 8 Pro 主动降噪长续航真无线蓝牙耳机",
+  "brand": "Redmi 红米",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 399.0,
+  "image_path": "2_数码电子/images/p_digital_037_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_037_1", "properties": {"版本": "标准版", "颜色": "炭石灰"}, "price": 399.0},
+    {"sku_id": "s_p_digital_037_2", "properties": {"版本": "标准版", "颜色": "晴雪白"}, "price": 399.0},
+    {"sku_id": "s_p_digital_037_3", "properties": {"版本": "标准版", "颜色": "湖水蓝"}, "price": 399.0},
+    {"sku_id": "s_p_digital_037_4", "properties": {"版本": "长续航版", "颜色": "炭石灰"}, "price": 499.0},
+    {"sku_id": "s_p_digital_037_5", "properties": {"版本": "长续航版", "颜色": "晴雪白"}, "price": 499.0},
+    {"sku_id": "s_p_digital_037_6", "properties": {"版本": "长续航版", "颜色": "湖水蓝"}, "price": 499.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "Redmi Buds 8 Pro 是一款 mock 入门级主动降噪真无线蓝牙耳机，适合日常通勤、网课和轻度运动。标准版单次播放约 7 小时、总续航约 30 小时；长续航版通过更大的充电盒将总续航提升到约 42 小时。耳机支持通透模式和双麦通话降噪。该产品强调实用与价格，降噪深度和麦克风抗风噪能力不以旗舰耳机为目标。",
+    "official_faq": [
+      {"question": "长续航版为什么价格更高？", "answer": "长续航版使用容量更大的充电盒，总续航约 42 小时；耳机本体和声音功能与标准版一致。"},
+      {"question": "适合用来上网课吗？", "answer": "支持电脑和手机的标准蓝牙播放与麦克风通话，安静室内适合网课；嘈杂环境下建议靠近设备使用。"},
+      {"question": "主动降噪能完全隔绝人声吗？", "answer": "不能。它更擅长降低空调、公交和地铁等持续噪声，突发人声仍可能听见。"}
+    ],
+    "user_reviews": [
+      {"nickname": "小石", "rating": 5, "content": "四百元价位功能齐全，公交上开降噪听播客比普通耳机清楚很多。"},
+      {"nickname": "暖阳", "rating": 4, "content": "长续航版一周通勤不用给盒子充电，体积比标准版稍厚一些。"},
+      {"nickname": "可可", "rating": 3, "content": "室内通话够用，路边风大时对方会觉得声音有点远。"},
+      {"nickname": "阿乐", "rating": 5, "content": "湖水蓝颜色清爽，耳机很轻，网课连续戴两个小时也没有明显压力。"},
+      {"nickname": "峰哥", "rating": 2, "content": "降噪和千元旗舰有差距，低频量感偏多，需要在均衡器里调整。"}
+    ]
+  }
+}

@@ -28,9 +28,9 @@ def catalog() -> ProductCatalog:
 @pytest.mark.parametrize(
     ("intent", "expected_min", "expected_max", "applied", "skip_reason"),
     [
-        (_intent(), None, 8698.8, True, None),
+        (_intent(), None, 8398.8, True, None),
         (_intent(max_price=8000), None, 8000, True, None),
-        (_intent(max_price=10000), None, 8698.8, True, None),
+        (_intent(max_price=10000), None, 8398.8, True, None),
         (_intent(min_price=9000), 9000, None, False, "explicit_min_exceeds_computed_cap"),
         (
             _intent(min_price=9000, max_price=10000),

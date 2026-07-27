@@ -1,0 +1,32 @@
+{
+  "product_id": "p_digital_030",
+  "title": "Xiaomi Buds 6 Pro 自适应降噪高解析真无线蓝牙耳机",
+  "brand": "小米",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 999.0,
+  "image_path": "2_数码电子/images/p_digital_030_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_030_1", "properties": {"版本": "标准版", "颜色": "陶瓷白"}, "price": 999.0},
+    {"sku_id": "s_p_digital_030_2", "properties": {"版本": "标准版", "颜色": "曜石黑"}, "price": 999.0},
+    {"sku_id": "s_p_digital_030_3", "properties": {"版本": "标准版", "颜色": "湖光蓝"}, "price": 999.0},
+    {"sku_id": "s_p_digital_030_4", "properties": {"版本": "无线充版", "颜色": "陶瓷白"}, "price": 1199.0},
+    {"sku_id": "s_p_digital_030_5", "properties": {"版本": "无线充版", "颜色": "曜石黑"}, "price": 1199.0},
+    {"sku_id": "s_p_digital_030_6", "properties": {"版本": "无线充版", "颜色": "湖光蓝"}, "price": 1199.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "Xiaomi Buds 6 Pro 是一款 mock 入耳式真无线蓝牙耳机，支持自适应主动降噪、通透模式和高解析音频。单次播放约 7 小时，配合充电盒总续航约 32 小时；无线充版支持兼容的 Qi 充电板。三麦克风通话降噪适合通勤和视频会议。高解析编码需要播放设备支持，开启强降噪和高解析音频会缩短续航。",
+    "official_faq": [
+      {"question": "Xiaomi Buds 6 Pro 可以连接非小米手机吗？", "answer": "可以通过标准蓝牙连接其他品牌手机，基础播放、通话和降噪可用；弹窗和部分高解析设置需要配套应用支持。"},
+      {"question": "标准版和无线充版有什么区别？", "answer": "耳机功能相同，无线充版的充电盒增加 Qi 无线充电，标准版通过 USB-C 充电。"},
+      {"question": "耳机适合运动吗？", "answer": "耳机支持日常汗水和小雨防护，适合跑步和健身，但不能游泳或在高压水流下使用。"}
+    ],
+    "user_reviews": [
+      {"nickname": "白桃", "rating": 5, "content": "陶瓷白外观干净，地铁里自适应降噪切换自然，人声和低频都比较均衡。"},
+      {"nickname": "阿威", "rating": 4, "content": "连接安卓手机很快，通话清楚，开高解析后续航会比普通模式短一些。"},
+      {"nickname": "晨风", "rating": 3, "content": "功能丰富但触控区域偏灵敏，整理头发时偶尔会误触暂停。"},
+      {"nickname": "露露", "rating": 5, "content": "无线充版放在桌面充电板上很方便，充电盒续航足够一周通勤。"},
+      {"nickname": "木木", "rating": 2, "content": "我的耳道比较小，最小耳塞戴久了仍有胀感，购买前最好试戴。"}
+    ]
+  }
+}

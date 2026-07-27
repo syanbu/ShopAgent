@@ -1,0 +1,50 @@
+{
+  "product_id": "p_digital_026",
+  "title": "荣耀 Magic 9 Pro 2K护眼屏潜望长焦旗舰5G智能手机",
+  "brand": "荣耀",
+  "category": "数码电子",
+  "sub_category": "智能手机",
+  "base_price": 5499.0,
+  "image_path": "2_数码电子/images/p_digital_026_live.jpg",
+  "skus": [
+    {
+      "sku_id": "s_p_digital_026_1",
+      "properties": {"存储": "12GB+256GB", "版本": "标准版", "颜色": "海湾蓝"},
+      "price": 5499.0
+    },
+    {
+      "sku_id": "s_p_digital_026_2",
+      "properties": {"存储": "16GB+512GB", "版本": "高配版", "颜色": "海湾蓝"},
+      "price": 6199.0
+    },
+    {
+      "sku_id": "s_p_digital_026_3",
+      "properties": {"存储": "16GB+1TB", "版本": "典藏版", "颜色": "曜石黑"},
+      "price": 6999.0
+    }
+  ],
+  "rag_knowledge": {
+    "marketing_description": "荣耀 Magic 9 Pro 是一款面向拍照、阅读和重度日常使用的 mock 旗舰手机。它配备 6.78 英寸 2K LTPO 护眼屏，支持 1-120Hz 自适应刷新率；后置主摄与潜望长焦覆盖日常、人像和远景拍摄。5600mAh 电池支持 100W 有线快充，机身具备 IP68 防尘防水。该机适合看重屏幕、长焦和多任务体验的用户；长时间高画质游戏仍建议搭配散热背夹，并避免边充边玩。",
+    "official_faq": [
+      {
+        "question": "荣耀 Magic 9 Pro 的屏幕适合长时间阅读吗？",
+        "answer": "它采用 2K LTPO 护眼屏，支持高频调光和色温调节。护眼功能只能降低部分视觉刺激，长时间阅读仍建议定时休息。"
+      },
+      {
+        "question": "潜望长焦适合拍什么场景？",
+        "answer": "潜望长焦适合拍远处建筑、舞台和人像特写，光线充足时细节更稳定；夜间高倍率拍摄建议借助固定支撑。"
+      },
+      {
+        "question": "三个存储版本怎么选？",
+        "answer": "日常社交和拍照可选 12GB+256GB；经常录制视频或多开应用建议 16GB+512GB；长期保存大量原片可选 16GB+1TB。"
+      }
+    ],
+    "user_reviews": [
+      {"nickname": "阿岚", "rating": 5, "content": "海湾蓝机身质感很好，屏幕看文档清楚，长焦拍演出也比普通数码变焦实用。"},
+      {"nickname": "北川", "rating": 4, "content": "续航能覆盖一天通勤，100W 快充很方便，不过戴上保护壳后整机略重。"},
+      {"nickname": "小树", "rating": 3, "content": "系统多任务流畅，护眼模式偏暖需要适应，夜景长焦手持时偶尔会糊。"},
+      {"nickname": "周周", "rating": 5, "content": "16GB+512GB 版本存照片和视频很从容，屏幕滑动顺畅，扬声器表现也不错。"},
+      {"nickname": "远山", "rating": 2, "content": "连续玩大型游戏后中框会明显发热，追求极限帧率的话还是需要额外散热。"}
+    ]
+  }
+}

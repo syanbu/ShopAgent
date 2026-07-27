@@ -1,0 +1,32 @@
+{
+  "product_id": "p_digital_035",
+  "title": "荣耀 Earbuds 5 Pro 智慧降噪长续航真无线蓝牙耳机",
+  "brand": "荣耀",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 799.0,
+  "image_path": "2_数码电子/images/p_digital_035_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_035_1", "properties": {"版本": "标准版", "颜色": "珍珠白"}, "price": 799.0},
+    {"sku_id": "s_p_digital_035_2", "properties": {"版本": "标准版", "颜色": "墨玉黑"}, "price": 799.0},
+    {"sku_id": "s_p_digital_035_3", "properties": {"版本": "标准版", "颜色": "晨曦金"}, "price": 799.0},
+    {"sku_id": "s_p_digital_035_4", "properties": {"版本": "无线充版", "颜色": "珍珠白"}, "price": 999.0},
+    {"sku_id": "s_p_digital_035_5", "properties": {"版本": "无线充版", "颜色": "墨玉黑"}, "price": 999.0},
+    {"sku_id": "s_p_digital_035_6", "properties": {"版本": "无线充版", "颜色": "晨曦金"}, "price": 999.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "荣耀 Earbuds 5 Pro 是一款 mock 真无线蓝牙耳机，主打智慧降噪、清晰通话和长续航。单次播放约 9 小时，搭配充电盒约 38 小时；无线充版支持 Qi 充电。耳机提供深度、均衡和轻度三档降噪，并支持双设备连接。深度降噪会增加耗电，户外运动时建议使用通透模式并保持合理音量。",
+    "official_faq": [
+      {"question": "三档降噪应该怎么选？", "answer": "飞机和地铁可用深度降噪，办公室适合均衡档，较安静环境可用轻度档或关闭降噪以延长续航。"},
+      {"question": "无线充版和标准版的续航一样吗？", "answer": "耳机和充电盒容量相同，主要区别是充电盒是否支持 Qi 无线充电。"},
+      {"question": "支持双设备连接吗？", "answer": "支持同时保持两台设备连接，可在电脑会议和手机来电之间切换。"}
+    ],
+    "user_reviews": [
+      {"nickname": "小荣", "rating": 5, "content": "珍珠白很温润，单次续航长，出差路上不用频繁放回盒子补电。"},
+      {"nickname": "安琪", "rating": 4, "content": "双设备连接适合办公，电脑开会时手机来电可以直接切换。"},
+      {"nickname": "东东", "rating": 3, "content": "降噪档位实用，强档开久了耳压感会比较明显，我更常用均衡档。"},
+      {"nickname": "松子", "rating": 5, "content": "无线充版随手放充电板就能补电，通话收音在室内很清楚。"},
+      {"nickname": "小河", "rating": 2, "content": "晨曦金颜色比图片更偏暖，而且触控偶尔会漏掉一次操作。"}
+    ]
+  }
+}

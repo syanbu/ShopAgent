@@ -43,12 +43,20 @@ def test_catalog_exposes_sorted_unique_brands(
     assert catalog.brands() == ["Apple 苹果", "小米"]
 
 
-def test_repository_dataset_contains_100_products() -> None:
+def test_repository_dataset_contains_112_products() -> None:
     root = Path("ecommerce_agent_dataset")
     if not root.exists():
         pytest.skip("repository dataset is unavailable")
     catalog = ProductCatalog.load(root)
-    assert len(catalog.all()) == 100
+    products = catalog.all()
+
+    assert len(products) == 112
+    assert sum(product.sub_category == "智能手机" for product in products) == 14
+    assert sum(product.sub_category == "真无线耳机" for product in products) == 10
+    assert {
+        f"p_digital_{index:03d}" for index in range(26, 38)
+    }.issubset({product.product_id for product in products})
+
     brands = set(catalog.brands())
     assert {"Apple 苹果", "Nike 耐克", "北面"}.issubset(brands)
     assert brands.isdisjoint({"苹果", "Nike", "耐克", "The North Face"})
@@ -95,8 +103,8 @@ def test_repository_price_reference_matches_design_baseline() -> None:
     tshirt = catalog.price_reference("服饰运动", "短袖T恤")
 
     assert smartphone is not None
-    assert (smartphone.sample_count, smartphone.median_min_sku_price) == (10, 7249.0)
-    assert smartphone.value_price_cap == 8698.8
+    assert (smartphone.sample_count, smartphone.median_min_sku_price) == (14, 6999.0)
+    assert smartphone.value_price_cap == 8398.8
     assert tshirt is not None
     assert (tshirt.sample_count, tshirt.median_min_sku_price) == (3, 129.0)
     assert tshirt.value_price_cap == 154.8

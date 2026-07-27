@@ -1,0 +1,32 @@
+{
+  "product_id": "p_digital_032",
+  "title": "OPPO Enco X4 深度降噪双单元真无线蓝牙耳机",
+  "brand": "OPPO",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 1099.0,
+  "image_path": "2_数码电子/images/p_digital_032_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_032_1", "properties": {"版本": "标准版", "颜色": "曜石黑"}, "price": 1099.0},
+    {"sku_id": "s_p_digital_032_2", "properties": {"版本": "标准版", "颜色": "月光白"}, "price": 1099.0},
+    {"sku_id": "s_p_digital_032_3", "properties": {"版本": "标准版", "颜色": "薄雾紫"}, "price": 1099.0},
+    {"sku_id": "s_p_digital_032_4", "properties": {"版本": "礼盒版", "颜色": "曜石黑"}, "price": 1249.0},
+    {"sku_id": "s_p_digital_032_5", "properties": {"版本": "礼盒版", "颜色": "月光白"}, "price": 1249.0},
+    {"sku_id": "s_p_digital_032_6", "properties": {"版本": "礼盒版", "颜色": "薄雾紫"}, "price": 1249.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "OPPO Enco X4 是一款 mock 双单元真无线蓝牙耳机，主打深度主动降噪、自然通透和均衡音质。单次播放约 6.5 小时，搭配充电盒约 30 小时，支持快充 10 分钟播放约 3 小时。礼盒版耳机硬件与标准版相同，增加保护套和备用耳塞。强降噪更适合持续低频噪声，无法完全消除近距离突发人声。",
+    "official_faq": [
+      {"question": "双单元有什么作用？", "answer": "低频和中高频由不同单元协同工作，便于兼顾低频下潜与人声细节，实际听感也受音源和耳塞贴合度影响。"},
+      {"question": "礼盒版的耳机功能更强吗？", "answer": "没有。礼盒版与标准版硬件和功能一致，只增加保护套及不同尺寸的备用耳塞。"},
+      {"question": "通透模式适合过马路使用吗？", "answer": "通透模式可以增强环境声，但不能替代观察交通环境；过马路时仍应降低音量并主动确认路况。"}
+    ],
+    "user_reviews": [
+      {"nickname": "小满", "rating": 5, "content": "地铁低频噪声压得很明显，双单元听人声不会发闷，薄雾紫也很好看。"},
+      {"nickname": "林哥", "rating": 4, "content": "快充适合临出门补电，触控逻辑简单，不过盒子表面容易留下指纹。"},
+      {"nickname": "米粒", "rating": 3, "content": "通透模式比较自然，嘈杂咖啡店里近处说话声还是会听到。"},
+      {"nickname": "小野", "rating": 5, "content": "礼盒版备用耳塞很实用，换到合适尺寸后降噪和低频都提升明显。"},
+      {"nickname": "一鸣", "rating": 2, "content": "连续戴三小时耳道有些胀，入耳式佩戴感对我来说不够轻松。"}
+    ]
+  }
+}

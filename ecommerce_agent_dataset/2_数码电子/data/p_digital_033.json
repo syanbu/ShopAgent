@@ -1,0 +1,29 @@
+{
+  "product_id": "p_digital_033",
+  "title": "Sony WF-1000XM7 旗舰降噪高解析真无线蓝牙耳机",
+  "brand": "Sony 索尼",
+  "category": "数码电子",
+  "sub_category": "真无线耳机",
+  "base_price": 1999.0,
+  "image_path": "2_数码电子/images/p_digital_033_live.jpg",
+  "skus": [
+    {"sku_id": "s_p_digital_033_1", "properties": {"版本": "标准版", "颜色": "铂金银"}, "price": 1999.0},
+    {"sku_id": "s_p_digital_033_2", "properties": {"版本": "标准版", "颜色": "静夜黑"}, "price": 1999.0},
+    {"sku_id": "s_p_digital_033_3", "properties": {"版本": "标准版", "颜色": "深海蓝"}, "price": 1999.0}
+  ],
+  "rag_knowledge": {
+    "marketing_description": "Sony WF-1000XM7 是一款 mock 旗舰真无线蓝牙耳机，面向重视降噪、声音细节和多设备连接的用户。它支持自适应降噪、环境声模式和兼容设备上的高解析编码，单次续航约 8 小时，搭配充电盒约 28 小时。记忆泡棉耳塞可提高密封性，但佩戴触感与普通硅胶不同；高解析编码需要播放端支持。",
+    "official_faq": [
+      {"question": "高解析音频可以在所有手机上使用吗？", "answer": "基础蓝牙播放支持主流手机，高解析编码需要手机系统和蓝牙芯片支持，未支持时会自动使用兼容编码。"},
+      {"question": "记忆泡棉耳塞如何选择尺寸？", "answer": "选择能稳定密封但不会产生持续胀痛的尺寸，佩戴前轻压泡棉，放入耳道后等待其回弹贴合。"},
+      {"question": "支持同时连接几台设备？", "answer": "支持两台设备多点连接，可在电脑播放与手机来电之间切换；高解析模式下部分设备可能限制多点连接。"}
+    ],
+    "user_reviews": [
+      {"nickname": "声场", "rating": 5, "content": "通勤降噪很强，低频不轰头，铂金银比纯白更耐脏，声音细节丰富。"},
+      {"nickname": "大海", "rating": 4, "content": "双设备连接办公方便，泡棉耳塞密封好，但夏天戴久了会有些闷。"},
+      {"nickname": "晨星", "rating": 3, "content": "应用里的可调选项很多，第一次使用需要花时间设置，默认声音偏稳重。"},
+      {"nickname": "小K", "rating": 5, "content": "飞机上对持续轰鸣的过滤效果明显，八小时单次续航够长途使用。"},
+      {"nickname": "阿牧", "rating": 2, "content": "价格偏高，而且我的旧手机不支持高解析编码，部分卖点没有发挥出来。"}
+    ]
+  }
+}

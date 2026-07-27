@@ -1,0 +1,50 @@
+{
+  "product_id": "p_digital_029",
+  "title": "Redmi K100 Pro 高性能长续航电竞5G智能手机",
+  "brand": "Redmi 红米",
+  "category": "数码电子",
+  "sub_category": "智能手机",
+  "base_price": 2999.0,
+  "image_path": "2_数码电子/images/p_digital_029_live.jpg",
+  "skus": [
+    {
+      "sku_id": "s_p_digital_029_1",
+      "properties": {"存储": "12GB+256GB", "版本": "标准版", "颜色": "银翼灰"},
+      "price": 2999.0
+    },
+    {
+      "sku_id": "s_p_digital_029_2",
+      "properties": {"存储": "16GB+512GB", "版本": "高配版", "颜色": "暗夜黑"},
+      "price": 3499.0
+    },
+    {
+      "sku_id": "s_p_digital_029_3",
+      "properties": {"存储": "16GB+1TB", "版本": "电竞版", "颜色": "银翼灰"},
+      "price": 3999.0
+    }
+  ],
+  "rag_knowledge": {
+    "marketing_description": "Redmi K100 Pro 是一款强调性价比、续航与游戏体验的 mock 5G 手机。6.67 英寸 1.5K 144Hz 直屏兼顾日常滑动和高帧游戏，6500mAh 电池支持 90W 快充。双扬声器、线性马达和游戏触控优化适合影音与手游。它没有无线充电，影像以日常扫码、记录和白天拍摄为主，适合预算有限但看重性能的用户。",
+    "official_faq": [
+      {
+        "question": "Redmi K100 Pro 支持无线充电吗？",
+        "answer": "不支持无线充电，随机兼容 90W 有线快充方案。"
+      },
+      {
+        "question": "144Hz 是否会明显增加耗电？",
+        "answer": "持续使用高刷新率会增加耗电，系统可根据场景自动切换，也可以手动固定为 60Hz 或 120Hz。"
+      },
+      {
+        "question": "哪个版本适合大型游戏？",
+        "answer": "12GB+256GB 可满足常见手游；大型游戏较多或需要录屏时建议 16GB+512GB，1TB 更适合长期保留多个大型资源包。"
+      }
+    ],
+    "user_reviews": [
+      {"nickname": "电玩熊", "rating": 5, "content": "三千元价位性能很有竞争力，144Hz 直屏触控跟手，双扬声器玩游戏有氛围。"},
+      {"nickname": "琪琪", "rating": 4, "content": "6500mAh 电池很耐用，一天重度使用还能剩电，缺点是机身不算轻。"},
+      {"nickname": "山海", "rating": 3, "content": "日常拍照够发朋友圈，夜景细节一般，适合把预算主要花在性能上的人。"},
+      {"nickname": "大宇", "rating": 5, "content": "16GB+512GB 装多个大型游戏仍有空间，散热表现比上一台中端机稳定。"},
+      {"nickname": "安然", "rating": 2, "content": "不支持无线充电有些遗憾，满负载时背部温度也比较明显。"}
+    ]
+  }
+}

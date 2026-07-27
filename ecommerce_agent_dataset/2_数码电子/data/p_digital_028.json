@@ -1,0 +1,50 @@
+{
+  "product_id": "p_digital_028",
+  "title": "一加 OnePlus 16 高刷直屏高性能游戏5G智能手机",
+  "brand": "一加 OnePlus",
+  "category": "数码电子",
+  "sub_category": "智能手机",
+  "base_price": 4299.0,
+  "image_path": "2_数码电子/images/p_digital_028_live.jpg",
+  "skus": [
+    {
+      "sku_id": "s_p_digital_028_1",
+      "properties": {"存储": "12GB+256GB", "版本": "标准版", "颜色": "松影绿"},
+      "price": 4299.0
+    },
+    {
+      "sku_id": "s_p_digital_028_2",
+      "properties": {"存储": "16GB+512GB", "版本": "高配版", "颜色": "松影绿"},
+      "price": 4999.0
+    },
+    {
+      "sku_id": "s_p_digital_028_3",
+      "properties": {"存储": "24GB+1TB", "版本": "性能版", "颜色": "玄墨黑"},
+      "price": 5799.0
+    }
+  ],
+  "rag_knowledge": {
+    "marketing_description": "一加 OnePlus 16 是面向高帧游戏和多任务用户的 mock 性能手机。6.78 英寸 1.5K 直屏支持最高 165Hz 刷新率，配合大面积均热板和游戏稳帧模式降低持续负载下的波动。6200mAh 电池支持 100W 有线快充。该机也适合影音和日常拍照，但影像侧更强调快速抓拍而非专业长焦；165Hz 只在适配应用中启用。",
+    "official_faq": [
+      {
+        "question": "OnePlus 16 所有游戏都支持 165Hz 吗？",
+        "answer": "不是。165Hz 需要游戏和系统共同适配，未适配游戏会按自身支持的帧率运行。"
+      },
+      {
+        "question": "长时间游戏会不会发热？",
+        "answer": "均热板可以延缓温升，但高画质、高帧率和边充边玩仍会让机身发热，建议在通风环境使用。"
+      },
+      {
+        "question": "12GB 和 24GB 运存差别大吗？",
+        "answer": "普通游戏和日常应用使用 12GB 已足够；经常多开大型游戏、直播或剪辑应用时，24GB 版本余量更大。"
+      }
+    ],
+    "user_reviews": [
+      {"nickname": "小北", "rating": 5, "content": "直屏打游戏不误触，松影绿背板不沾指纹，常玩的竞技手游高帧模式很稳。"},
+      {"nickname": "七七", "rating": 4, "content": "6200mAh 电池续航扎实，充电也快，不过机身尺寸对小手用户不太友好。"},
+      {"nickname": "阿峰", "rating": 5, "content": "16GB+512GB 多开应用很顺畅，游戏切到聊天再回来基本不用重新加载。"},
+      {"nickname": "明仔", "rating": 3, "content": "主摄白天够用，远距离拍摄比较一般，定位确实更偏性能而不是影像。"},
+      {"nickname": "栗子", "rating": 2, "content": "最高画质连续玩一小时后握持区域偏热，165Hz 支持的游戏也没有想象中多。"}
+    ]
+  }
+}
