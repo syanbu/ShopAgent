@@ -176,6 +176,19 @@ def _build_turn_query_system_prompt(
                     },
                 },
             },
+            {
+                "input": "有哪些存储版本？",
+                "output": {
+                    "schema_version": 1,
+                    "intent": "product_question",
+                    "reference": None,
+                    "product_question": {
+                        "text": "有哪些存储版本？",
+                        "kind": "structured",
+                        "field": "sku",
+                    },
+                },
+            },
         ],
     )
     return (
@@ -192,7 +205,9 @@ def _build_turn_query_system_prompt(
         "线索。不得输出可信 product_id，不得自行选择或解析候选 ID；确定性代码稍后"
         "解析。recent_candidates 是唯一可引用的最近一轮候选域，更早结果不可用。"
         "含糊的‘这个/那个/它’等指示表达必须保留为 demonstrative 指示线索，不得"
-        "编造目标。\n"
+        "编造目标。reference.surface_text 必须逐字复制自当前 message 中的连续原文片段；"
+        "不得把 recent_candidates 中的标题、品牌或 focused_product_id 转写为本轮"
+        "reference；没有显式引用时 reference 必须为 null。\n"
         "操作规则：semantic_term_operations 的 add 增加语义词，remove 删除明确"
         "语义词，clear 清空语义词；add/remove 必须带值，clear 不带值。"
         "slot_operations 的 replace 替换标量，add 增加列表、SKU 或数值条件，"
@@ -572,9 +587,17 @@ class DashScopeTurnQueryParser(_DashScopeChatGateway):
         self,
         content: str,
         context: TurnContext,
+        message: str,
     ) -> TurnQuery:
         parsed = TurnQuery.model_validate_json(content)
         reference = parsed.reference
+        if reference is not None:
+            surface_text = reference.surface_text.strip()
+            if not surface_text or surface_text not in message:
+                raise ValueError(
+                    "reference surface_text must be a contiguous span "
+                    "of the current message"
+                )
         if reference is not None and reference.kind == "brand":
             brand = self._exact_string(reference.brand, "reference brand")
             if self._brands and brand not in self._brands:
@@ -691,7 +714,7 @@ class DashScopeTurnQueryParser(_DashScopeChatGateway):
         ]
         return await self._structured_call(
             messages,
-            lambda content: self._validate_turn_query(content, context),
+            lambda content: self._validate_turn_query(content, context, message),
             "TURN_QUERY_PARSE_FAILED",
         )
 

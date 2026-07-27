@@ -74,6 +74,9 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 - 没有焦点且最近展示多个商品时，裸指代触发澄清。
 - 商品追问即使没有显式 `reference`，也按裸指代规则使用焦点或唯一最近候选；多候选
   且无焦点时必须进入澄清，不能直接落入商品知识失败。
+- `ProductReference.surface_text` 必须逐字来自当前用户消息中的连续原文片段。模型不能
+  把最近候选标题、品牌或焦点商品转写成本轮显式引用；缺少原文依据的引用按非法结构化
+  输出纠正一次，避免它绕过已有焦点。
 - 模型只能提取指代线索，可信 `product_id` 必须由代码根据 Catalog 和会话状态生成。
 
 用户明确选择某个候选后，该商品成为焦点。连续追问中的“它”可以指向该焦点。新
@@ -131,7 +134,9 @@ SKU、场景、必需特征、排除条件、最近候选、焦点和已展示�
 “第二个多少钱”解析出商品后直接从 `ProductCatalog` 读取价格、品牌、SKU 等结构化
 事实。“第二个防水吗”若无法由结构化字段回答，则按 `product_id` 精确读取 Qdrant 中
 该商品的 summary、FAQ 和评论 Chunk。第一版单商品 Chunk 数量较少，读取全部 Chunk，
-不调用全库向量召回；没有证据时明确说明信息不足。
+不调用全库向量召回；没有证据时明确说明信息不足。回答模型将确定性代码解析出的目标
+绑定视为可信结论，不能因为提示词只包含单个目标商品、未重复提供候选排名而重新质疑
+“第二款”等指代是否成立。
 
 ## 接口与数据
 
@@ -434,8 +439,10 @@ pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层�
 | 标量、列表、SKU、数值和语义操作 | `tests/unit/test_multi_turn_query_compiler.py::test_refinement_replaces_budget_and_preserves_unrelated_slot`、`test_brand_and_feature_slots_support_remove_and_clear`、`test_sku_operations_are_stable_and_copy_on_write`、`test_numeric_operations_are_stable_and_copy_on_write`、`test_semantic_terms_add_and_remove_in_stable_order`；`tests/unit/test_turn_query_models.py::test_semantic_term_add_and_remove_reject_blank_values` |
 | 相对价格基准与明确金额覆盖 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent`、`test_missing_price_baseline_answer_preserves_existing_snapshot_and_retrieves`；`tests/unit/test_multi_turn_query_compiler.py::test_focus_price_is_the_cheaper_baseline`、`test_latest_batch_extreme_is_relative_price_baseline`、`test_explicit_applicable_boundary_overrides_relative_price` |
 | seen 累积、mutation 全库重检索且 ordinal 只看最新批 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_more_batches_accumulate_seen_and_final_ordinal_targets_h`、`test_more_results_with_query_mutation_refines_from_full_catalog`；`tests/unit/test_multi_turn_query_compiler.py::test_more_results_with_price_operation_becomes_refinement`、`test_more_results_with_semantic_operation_becomes_refinement`、`test_more_results_with_relative_price_becomes_refinement` |
-| 无显式商品 reference 的焦点/单候选回退与多候选澄清 | `tests/unit/test_multi_turn_workflow.py::test_reference_less_product_question_uses_focused_product`、`test_reference_less_product_question_uses_only_recent_candidate`、`test_reference_less_product_question_with_multiple_candidates_clarifies` |
+| 无显式商品 reference 的焦点/单候选回退与多候选澄清 | `tests/unit/test_multi_turn_workflow.py::test_reference_less_product_question_uses_focused_product`、`test_reference_less_structured_question_uses_focused_product_skus`、`test_reference_less_product_question_uses_only_recent_candidate`、`test_reference_less_product_question_with_multiple_candidates_clarifies` |
+| 引用必须来自当前消息原文，不能由候选或焦点补写 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_ungrounded_reference_to_none`、`test_turn_query_parser_rejects_twice_ungrounded_reference` |
 | TurnQuery 引用品牌 taxonomy 纠正与安全失败 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_invalid_reference_brand`、`test_turn_query_parser_normalizes_twice_invalid_reference_brand` |
+| 商品问答生成器信任已解析目标，不重新质疑序数绑定 | `tests/unit/test_multi_turn_workflow.py::test_semantic_question_fetches_only_target_chunks_and_persists_focus` |
 | Catalog 结构化事实与 Qdrant 精确商品 scroll | `tests/unit/test_multi_turn_workflow.py::test_structured_fields_are_catalog_and_current_snapshot_only`；`tests/unit/test_qdrant_filters.py::test_fetch_product_chunks_scrolls_all_pages_in_order_without_scores`；`tests/unit/test_retrieval_service.py::test_fetch_product_chunks_delegates_without_embedding_or_reranking` |
 | SQLite 重建、隔离、版本冲突和错误归一化 | `tests/unit/test_conversation_repository.py::test_save_new_state_creates_parent_and_survives_repository_recreation`、`test_conversations_remain_isolated`、`test_stale_version_returns_retryable_conversation_conflict`、`test_invalid_persisted_state_is_normalized_without_content_leakage` |
 | 固定商品数据、无失效迁移、v1 无 Redis/MySQL | `tests/unit/test_conversation_repository.py::test_state_json_is_compact_domain_state_without_product_body` 固化只存 ID/领域状态的边界；固定数据和无 Redis/MySQL 是本文“范围”和“关键决策”的显式 v1 限制 |

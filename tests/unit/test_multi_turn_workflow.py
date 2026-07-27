@@ -1756,6 +1756,35 @@ async def test_reference_less_product_question_uses_focused_product(
 
 
 @pytest.mark.asyncio
+async def test_reference_less_structured_question_uses_focused_product_skus(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    repository = FakeConversationRepository(
+        ConversationRecord(state=_conversation(focus="p2"), version=3)
+    )
+    parser = FakeTurnQueryParser(
+        [
+            _turn(
+                "product_question",
+                question=_structured_question("sku", "有哪些存储版本？"),
+            )
+        ]
+    )
+
+    await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "有哪些存储版本？",
+    )
+
+    assert harness.retrieval.fetch_product_calls == []
+    assert '"product_id":"p2"' in harness.response.prompts[0]
+    assert '"sku_id":"p2-black"' in harness.response.prompts[0]
+    assert repository.record is not None
+    assert repository.record.state.focused_product_id == "p2"
+
+
+@pytest.mark.asyncio
 async def test_reference_less_product_question_uses_only_recent_candidate(
     tmp_path: Path,
 ) -> None:
@@ -2673,6 +2702,8 @@ async def test_semantic_question_fetches_only_target_chunks_and_persists_focus(
     prompt = harness.response.prompts[0]
     assert harness.retrieval.fetch_product_calls == ["p2"]
     assert all(value in prompt for value in (
+        "目标商品已由可信代码根据用户指代唯一确定",
+        "不得重新判断、质疑或说明指代关系",
         '"product_id":"p2"',
         '"title":"通勤耳机 2"',
         '"brand":"品牌 2"',

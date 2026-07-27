@@ -83,6 +83,33 @@ def _turn_response(
     )
 
 
+def _focused_sku_question_response(*, include_reference: bool) -> SimpleNamespace:
+    return _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": (
+                    {
+                        "target_type": "product",
+                        "surface_text": "商品2",
+                        "kind": "product_name",
+                        "product_name": "商品2",
+                    }
+                    if include_reference
+                    else None
+                ),
+                "product_question": {
+                    "text": "有哪些存储版本？",
+                    "kind": "structured",
+                    "field": "sku",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def _turn_context() -> TurnContext:
     suspended = TurnQuery(schema_version=1, intent="refine_search")
     return TurnContext(
@@ -193,6 +220,8 @@ def test_turn_query_prompt_contains_schema_taxonomy_and_complete_contract() -> N
     assert "第二个防水吗" in prompt
     assert "semantic" in prompt
     assert "指示" in prompt
+    assert "当前 message 中的连续原文片段" in prompt
+    assert "没有显式引用时 reference 必须为 null" in prompt
     assert "不得遗漏" in prompt
 
 
@@ -227,7 +256,10 @@ async def test_turn_query_parser_sends_only_compact_current_context(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
 
-    result = await _turn_parser(settings, client).parse("它防水吗", _turn_context())
+    result = await _turn_parser(settings, client).parse(
+        "第二个防水吗",
+        _turn_context(),
+    )
 
     assert result.intent == "product_question"
     assert create.await_args is not None
@@ -242,7 +274,7 @@ async def test_turn_query_parser_sends_only_compact_current_context(
         "focused_product_id",
         "pending_clarification",
     }
-    assert payload["message"] == "它防水吗"
+    assert payload["message"] == "第二个防水吗"
     assert payload["query_snapshot"]["category"] == "数码电子"
     assert payload["query_snapshot"]["constraints"]["max_price"] == 5000
     assert payload["recent_candidates"] == [
@@ -368,6 +400,52 @@ async def test_turn_query_parser_maps_two_invalid_outputs_to_safe_error(
     assert caught.value.message == "invalid structured output"
     assert "upstream-secret-one" not in caught.value.message
     assert "upstream-secret-two" not in caught.value.message
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_corrects_ungrounded_reference_to_none(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(
+        side_effect=[
+            _focused_sku_question_response(include_reference=True),
+            _focused_sku_question_response(include_reference=False),
+        ]
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _turn_parser(settings, client).parse(
+        "有哪些存储版本？",
+        _turn_context(),
+    )
+
+    assert result.reference is None
+    assert result.product_question is not None
+    assert result.product_question.field == "sku"
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_rejects_twice_ungrounded_reference(
+    settings: Settings,
+) -> None:
+    invalid = _focused_sku_question_response(include_reference=True)
+    create = AsyncMock(side_effect=[invalid, invalid])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        await _turn_parser(settings, client).parse(
+            "有哪些存储版本？",
+            _turn_context(),
+        )
+
+    assert caught.value.code == "TURN_QUERY_PARSE_FAILED"
+    assert caught.value.retryable is True
     assert create.await_count == 2
 
 
