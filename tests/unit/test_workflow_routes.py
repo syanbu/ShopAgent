@@ -4,8 +4,10 @@ from typing import Any
 import pytest
 
 from shop_agent.models.turn_query import TurnQuery
+from shop_agent.models.retrieval import SelectedProduct
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
+from shop_agent.workflow.nodes import build_nodes, route_selection
 from tests.unit.workflow_fakes import build_harness, initial_state
 
 
@@ -109,15 +111,11 @@ async def test_no_hits_skips_rerank_validation_and_decision(tmp_path: Path) -> N
     assert harness.retrieval.rerank_calls == []
     assert harness.evidence.validate_calls == []
     assert harness.evidence.select_calls == []
-    assert [part["data"]["event"] for part in events] == [
-        "text_delta",
-        "text_delta",
-    ]
-    assert "没有召回到商品" in harness.response.prompts[0]
-    assert all(
-        forbidden in harness.response.prompts[0]
-        for forbidden in ("库存", "优惠", "优惠券", "购买链接", "不得")
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == (
+        "当前筛选条件下没有找到匹配商品，建议您放宽或修改筛选条件。"
     )
+    assert harness.response.prompts == []
 
 
 @pytest.mark.asyncio
@@ -131,11 +129,45 @@ async def test_evidence_empty_skips_candidate_decision(tmp_path: Path) -> None:
     assert len(harness.retrieval.rerank_calls) == 1
     assert len(harness.evidence.validate_calls) == 1
     assert harness.evidence.select_calls == []
-    assert [part["data"]["event"] for part in events] == [
-        "text_delta",
-        "text_delta",
-    ]
-    assert "没有通过证据校验的商品" in harness.response.prompts[0]
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == (
+        "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
+        "建议您调整筛选条件。"
+    )
+    assert harness.response.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_fixed_no_result_response_requires_reason(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    nodes = build_nodes(_dependencies(harness))
+    events: list[dict[str, object]] = []
+
+    with pytest.raises(
+        RuntimeError,
+        match="no-result response requires a reason",
+    ):
+        await nodes.emit_no_results_response(
+            {"response_mode": "no_results"},
+            events.append,
+        )
+
+    assert events == []
+
+
+def test_selection_route_distinguishes_empty_and_nonempty_products() -> None:
+    assert route_selection({"selected_products": []}) == "no_products"
+
+    selected = SelectedProduct(
+        product_id="p1",
+        rerank_score=0.9,
+        evidence_ids=["p1:summary"],
+        decision_reasons=["test"],
+        matched_sku_ids=["p1-black"],
+    )
+    assert route_selection({"selected_products": [selected]}) == "has_products"
 
 
 @pytest.mark.asyncio

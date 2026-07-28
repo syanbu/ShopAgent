@@ -10,7 +10,12 @@ from shop_agent.models.conversation import (
     ConversationRecord,
     ConversationState,
 )
-from shop_agent.models.turn_query import ProductQuestion, ProductReference, TurnQuery
+from shop_agent.models.turn_query import (
+    ProductQuestion,
+    ProductReference,
+    ReferenceCandidateMatch,
+    TurnQuery,
+)
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 from tests.unit.workflow_fakes import build_harness, initial_state
@@ -217,6 +222,11 @@ async def test_product_question_stream_contains_text_deltas_only(tmp_path: Path)
             surface_text="第二个",
             kind="ordinal",
             ordinal=2,
+            candidate_matches=[
+                ReferenceCandidateMatch(product_id="p1", matches=False),
+                ReferenceCandidateMatch(product_id="p2", matches=True),
+                ReferenceCandidateMatch(product_id="p3", matches=False),
+            ],
         ),
         product_question=ProductQuestion(
             text="第二个多少钱",

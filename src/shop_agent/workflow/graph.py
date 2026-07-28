@@ -6,11 +6,13 @@ from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.nodes import (
     build_nodes,
     route_compilation,
+    route_category_resolution,
     route_pending_action,
     route_product_question,
     route_reference_resolution,
     route_resumed_action,
     route_retrieval,
+    route_selection,
     route_turn,
     route_validation,
 )
@@ -23,6 +25,10 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
     builder.add_node("parse_turn_query", nodes.parse_turn_query)
     builder.add_node("resume_pending_action", nodes.resume_pending_action)
     builder.add_node("resolve_reference", nodes.resolve_reference)
+    builder.add_node(
+        "resolve_category_reference",
+        nodes.resolve_category_reference,
+    )
     builder.add_node("persist_clarification", nodes.persist_clarification)
     builder.add_node("merge_query_snapshot", nodes.merge_query_snapshot)
     builder.add_node("compile_effective_query", nodes.compile_effective_query)
@@ -33,6 +39,7 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
     builder.add_node("decide_candidates", nodes.decide_candidates)
     builder.add_node("persist_search_result", nodes.persist_search_result)
     builder.add_node("persist_no_results", nodes.persist_no_results)
+    builder.add_node("emit_no_results_response", nodes.emit_no_results_response)
     builder.add_node("load_product_facts", nodes.load_product_facts)
     builder.add_node("fetch_product_knowledge", nodes.fetch_product_knowledge)
     builder.add_node("persist_focus", nodes.persist_focus)
@@ -58,6 +65,14 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
     builder.add_conditional_edges(
         "resolve_reference",
         route_reference_resolution,
+        {
+            "resolved": "resolve_category_reference",
+            "needs_clarification": "persist_clarification",
+        },
+    )
+    builder.add_conditional_edges(
+        "resolve_category_reference",
+        route_category_resolution,
         {
             "resolved": "route_turn",
             "needs_clarification": "persist_clarification",
@@ -106,10 +121,18 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             "no_candidates": "persist_no_results",
         },
     )
-    builder.add_edge("decide_candidates", "persist_search_result")
+    builder.add_conditional_edges(
+        "decide_candidates",
+        route_selection,
+        {
+            "has_products": "persist_search_result",
+            "no_products": "persist_no_results",
+        },
+    )
     builder.add_edge("persist_search_result", "emit_product_events")
     builder.add_edge("emit_product_events", "generate_response")
-    builder.add_edge("persist_no_results", "generate_response")
+    builder.add_edge("persist_no_results", "emit_no_results_response")
+    builder.add_edge("emit_no_results_response", END)
     builder.add_conditional_edges(
         "load_product_facts",
         route_product_question,

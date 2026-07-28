@@ -8,7 +8,11 @@ from shop_agent.models.conversation import (
     PendingClarification,
     QuerySnapshot,
 )
-from shop_agent.models.turn_query import ProductQuestion, TurnQuery
+from shop_agent.models.turn_query import (
+    CategoryCandidate,
+    ProductQuestion,
+    TurnQuery,
+)
 
 
 def _suspended_turn() -> TurnQuery:
@@ -160,6 +164,52 @@ def test_pending_clarification_round_trip_retains_suspended_turn_and_attempt_cou
     assert restored.pending_clarification.suspended_turn_query.intent == "product_question"
 
 
+def test_legacy_pending_reference_without_candidate_matches_still_loads() -> None:
+    payload = {
+        "schema_version": 1,
+        "conversation_id": "c1",
+        "query_snapshot": None,
+        "recent_candidates": [
+            {"rank": 1, "product_id": "p1", "display_price": 399}
+        ],
+        "focused_product_id": None,
+        "seen_product_ids": ["p1"],
+        "pending_clarification": {
+            "kind": "ambiguous_reference",
+            "candidate_product_ids": ["p1"],
+            "suspended_turn_query": {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "那个",
+                    "kind": "demonstrative",
+                    "ordinal": None,
+                    "brand": None,
+                    "product_name": None,
+                },
+                "semantic_term_operations": [],
+                "slot_operations": [],
+                "relative_price": None,
+                "product_question": {
+                    "text": "那个怎么样",
+                    "kind": "semantic",
+                    "field": None,
+                },
+                "cancel_pending": False,
+            },
+            "attempt_count": 1,
+        },
+    }
+
+    restored = ConversationState.model_validate(payload)
+
+    assert restored.pending_clarification is not None
+    reference = restored.pending_clarification.suspended_turn_query.reference
+    assert reference is not None
+    assert reference.candidate_matches == []
+
+
 def test_pending_clarification_candidates_are_immutable() -> None:
     pending = PendingClarification(
         kind="missing_context",
@@ -170,6 +220,53 @@ def test_pending_clarification_candidates_are_immutable() -> None:
     assert pending.candidate_product_ids == ("p1",)
     with pytest.raises(AttributeError):
         pending.candidate_product_ids.append("p2")
+
+
+def test_old_pending_json_defaults_category_scopes_to_empty() -> None:
+    pending = PendingClarification.model_validate(
+        {
+            "kind": "missing_context",
+            "suspended_turn_query": {
+                "schema_version": 1,
+                "intent": "refine_search",
+            },
+        }
+    )
+
+    assert pending.candidate_category_scopes == ()
+
+
+def test_pending_category_scopes_are_normalized_and_unique() -> None:
+    pending = PendingClarification(
+        kind="ambiguous_category",
+        candidate_category_scopes=(
+            CategoryCandidate(
+                category=" 数码电子 ",
+                sub_category=" 真无线耳机 ",
+            ),
+        ),
+        suspended_turn_query=TurnQuery(
+            schema_version=1,
+            intent="new_search",
+        ),
+    )
+
+    assert pending.candidate_category_scopes == (
+        CategoryCandidate(
+            category="数码电子",
+            sub_category="真无线耳机",
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="category scopes must be unique"):
+        PendingClarification(
+            kind="ambiguous_category",
+            candidate_category_scopes=(
+                pending.candidate_category_scopes[0],
+                pending.candidate_category_scopes[0],
+            ),
+            suspended_turn_query=pending.suspended_turn_query,
+        )
 
 
 def test_conversation_rejects_clarification_candidates_outside_recent_candidates() -> None:

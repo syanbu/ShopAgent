@@ -150,6 +150,11 @@ def _build_turn_query_system_prompt(
                         "surface_text": "第二个",
                         "kind": "ordinal",
                         "ordinal": 2,
+                        "candidate_matches": [
+                            {"product_id": "p1", "matches": False},
+                            {"product_id": "p2", "matches": True},
+                            {"product_id": "p3", "matches": False},
+                        ],
                     },
                     "product_question": {
                         "text": "第二个多少钱",
@@ -168,6 +173,11 @@ def _build_turn_query_system_prompt(
                         "surface_text": "第二个",
                         "kind": "ordinal",
                         "ordinal": 2,
+                        "candidate_matches": [
+                            {"product_id": "p1", "matches": False},
+                            {"product_id": "p2", "matches": True},
+                            {"product_id": "p3", "matches": False},
+                        ],
                     },
                     "product_question": {
                         "text": "第二个防水吗",
@@ -186,6 +196,52 @@ def _build_turn_query_system_prompt(
                         "text": "有哪些存储版本？",
                         "kind": "structured",
                         "field": "sku",
+                    },
+                },
+            },
+            {
+                "input": "中间那个怎么样",
+                "output": {
+                    "schema_version": 1,
+                    "intent": "product_question",
+                    "reference": {
+                        "target_type": "product",
+                        "surface_text": "中间那个",
+                        "kind": "ordinal",
+                        "ordinal": 2,
+                        "candidate_matches": [
+                            {"product_id": "p1", "matches": False},
+                            {"product_id": "p2", "matches": True},
+                            {"product_id": "p3", "matches": False},
+                        ],
+                    },
+                    "product_question": {
+                        "text": "中间那个怎么样",
+                        "kind": "semantic",
+                        "field": None,
+                    },
+                },
+            },
+            {
+                "input": "小米那个怎么样",
+                "output": {
+                    "schema_version": 1,
+                    "intent": "product_question",
+                    "reference": {
+                        "target_type": "product",
+                        "surface_text": "小米那个",
+                        "kind": "brand",
+                        "brand": "小米",
+                        "candidate_matches": [
+                            {"product_id": "p1", "matches": True},
+                            {"product_id": "p2", "matches": True},
+                            {"product_id": "p3", "matches": False},
+                        ],
+                    },
+                    "product_question": {
+                        "text": "小米那个怎么样",
+                        "kind": "semantic",
+                        "field": None,
                     },
                 },
             },
@@ -208,6 +264,19 @@ def _build_turn_query_system_prompt(
         "编造目标。reference.surface_text 必须逐字复制自当前 message 中的连续原文片段；"
         "不得把 recent_candidates 中的标题、品牌或 focused_product_id 转写为本轮"
         "reference；没有显式引用时 reference 必须为 null。\n"
+        "候选匹配规则：candidate_matches 必须按 recent_candidates 的 rank 顺序逐项"
+        "输出，每个候选 product_id 恰好一次；matches=true 表示候选符合当前"
+        "surface_text，false 表示不符合。必须标记所有可能匹配项，不能为了避免澄清"
+        "只选择一个。product_id 只能逐字复制 recent_candidates 中的值，不能生成"
+        "其他 ID。reference=null 时不存在候选匹配。\n"
+        "品类指代规则：用户的商品类型说法可以是简称、别名或上位词。"
+        "有明确商品类型时，category_reference.surface_text 必须逐字复制当前 message "
+        "中的连续原文片段，candidates 必须按 taxonomy 稳定顺序列出所有合理的精确 "
+        "Catalog category/sub_category 范围，不能为了避免澄清只返回一个。"
+        "没有明确商品类型时 category_reference 必须为 null。已识别为品类的原文不得"
+        "只写入 semantic_term_operations；category_reference 不得与 category 或 "
+        "sub_category slot operation 同时出现。用户明确指向整个顶级类目时 candidate "
+        "的 sub_category 可以为 null，普通上位词不得借此扩大为无关商品范围。\n"
         "操作规则：semantic_term_operations 的 add 增加语义词，remove 删除明确"
         "语义词，clear 清空语义词；add/remove 必须带值，clear 不带值。"
         "slot_operations 的 replace 替换标量，add 增加列表、SKU 或数值条件，"
@@ -220,8 +289,9 @@ def _build_turn_query_system_prompt(
         "对应 field；其他开放问题是 semantic 且 field 为 null。‘第二个多少钱’"
         "必须映射为 ordinal 2、structured、field=display_price；‘第二个防水吗’"
         "必须映射为 ordinal 2、semantic、field=null。模型不得输出事实答案。\n"
-        "taxonomy 规则：category、sub_category、category pair、品牌和 SKU key/value "
-        "只能使用可用 taxonomy 中的精确值，不得使用别名或自行造词。\n"
+        "taxonomy 规则：模型可以理解用户别名，但输出的 category、sub_category、"
+        "category pair、品牌和 SKU key/value 只能使用可用 taxonomy 中的精确值，"
+        "不得把别名或自行造词写入这些输出字段。\n"
         f"输出 JSON Schema：{schema_json}\n"
         f"可用 taxonomy：{taxonomy_json}\n"
         f"参考示例：{examples_json}"
@@ -598,6 +668,41 @@ class DashScopeTurnQueryParser(_DashScopeChatGateway):
                     "reference surface_text must be a contiguous span "
                     "of the current message"
                 )
+        category_reference = parsed.category_reference
+        if category_reference is not None:
+            surface_text = category_reference.surface_text.strip()
+            if not surface_text or surface_text not in message:
+                raise ValueError(
+                    "category reference surface_text must be a contiguous span "
+                    "of the current message"
+                )
+            scopes = [
+                (candidate.category, candidate.sub_category)
+                for candidate in category_reference.candidates
+            ]
+            if scopes != sorted(
+                scopes,
+                key=lambda scope: (scope[0], scope[1] or ""),
+            ):
+                raise ValueError(
+                    "category reference candidates must use stable taxonomy order"
+                )
+            for category_value, sub_category_value in scopes:
+                if self._categories and category_value not in self._categories:
+                    raise ValueError(
+                        "category reference category must be an exact catalog value"
+                    )
+                if sub_category_value is None:
+                    continue
+                if (
+                    self._category_pairs
+                    and (category_value, sub_category_value)
+                    not in self._category_pairs
+                ):
+                    raise ValueError(
+                        "category reference candidate must be an exact catalog pair"
+                    )
+        self._validate_reference_candidate_matches(parsed, context)
         if reference is not None and reference.kind == "brand":
             brand = self._exact_string(reference.brand, "reference brand")
             if self._brands and brand not in self._brands:
@@ -614,6 +719,26 @@ class DashScopeTurnQueryParser(_DashScopeChatGateway):
                 sub_category=sub_category,
             )
         return parsed
+
+    @staticmethod
+    def _validate_reference_candidate_matches(
+        parsed: TurnQuery,
+        context: TurnContext,
+    ) -> None:
+        reference = parsed.reference
+        if reference is None:
+            return
+        expected_ids = [
+            candidate.product_id for candidate in context.recent_candidates
+        ]
+        actual_ids = [
+            item.product_id for item in reference.candidate_matches
+        ]
+        if actual_ids != expected_ids:
+            raise ValueError(
+                "reference candidate_matches must cover every recent candidate "
+                "exactly once in rank order"
+            )
 
     def _target_category_pair(
         self,

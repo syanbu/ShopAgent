@@ -10,7 +10,11 @@ from shop_agent.models.conversation import (
 )
 from shop_agent.models.product import Product
 from shop_agent.models.query import NumericConstraint, SearchConstraints
-from shop_agent.models.turn_query import TurnQuery
+from shop_agent.models.turn_query import (
+    CategoryCandidate,
+    CategoryReference,
+    TurnQuery,
+)
 from shop_agent.services.multi_turn_query_compiler import merge_turn_query
 
 
@@ -179,6 +183,131 @@ def test_refinement_replaces_budget_and_preserves_unrelated_slot(
     assert result.state.focused_product_id is None
     assert result.state.seen_product_ids == []
     _assert_input_unchanged(state, before)
+
+
+def test_resolved_category_scope_seeds_a_new_search_snapshot(
+    catalog: ProductCatalog,
+) -> None:
+    scope = CategoryCandidate(
+        category="数码电子",
+        sub_category="蓝牙耳机",
+    )
+    result = merge_turn_query(
+        _turn(
+            "new_search",
+            category_reference=CategoryReference(
+                surface_text="耳机",
+                candidates=[scope],
+            ),
+        ),
+        _state(),
+        catalog,
+        resolved_category_scope=scope,
+    )
+
+    assert result.snapshot == QuerySnapshot(
+        category="数码电子",
+        sub_category="蓝牙耳机",
+    )
+    assert result.parsed_intent is not None
+    assert result.parsed_intent.sub_category == "蓝牙耳机"
+
+
+def test_resolved_category_scope_is_applied_before_sku_validation(
+    catalog: ProductCatalog,
+) -> None:
+    scope = CategoryCandidate(
+        category="数码电子",
+        sub_category="智能手机",
+    )
+    result = merge_turn_query(
+        _turn(
+            "new_search",
+            category_reference=CategoryReference(
+                surface_text="手机",
+                candidates=[scope],
+            ),
+            slot_operations=[
+                {
+                    "slot": "constraints.sku_constraints",
+                    "operation": "add",
+                    "sku_key": "storage",
+                    "value": "512GB",
+                }
+            ],
+        ),
+        _state(),
+        catalog,
+        resolved_category_scope=scope,
+    )
+
+    assert result.needs_clarification is False
+    assert result.snapshot == QuerySnapshot(
+        category="数码电子",
+        sub_category="智能手机",
+        constraints=SearchConstraints(
+            sku_constraints={"storage": ["512GB"]},
+        ),
+    )
+
+
+def test_resolved_category_scope_switches_and_resets_old_conditions(
+    catalog: ProductCatalog,
+) -> None:
+    scope = CategoryCandidate(
+        category="服饰运动",
+        sub_category="跑步鞋",
+    )
+    result = merge_turn_query(
+        _turn(
+            "refine_search",
+            category_reference=CategoryReference(
+                surface_text="跑步鞋",
+                candidates=[scope],
+            ),
+        ),
+        _state(
+            QuerySnapshot(
+                category="数码电子",
+                sub_category="蓝牙耳机",
+                constraints=SearchConstraints(max_price=500),
+            )
+        ),
+        catalog,
+        resolved_category_scope=scope,
+    )
+
+    assert result.intent == "switch_category"
+    assert result.snapshot == QuerySnapshot(
+        category="服饰运动",
+        sub_category="跑步鞋",
+    )
+
+
+def test_resolved_top_level_category_is_a_valid_switch_target(
+    catalog: ProductCatalog,
+) -> None:
+    scope = CategoryCandidate(category="服饰运动")
+    result = merge_turn_query(
+        _turn(
+            "refine_search",
+            category_reference=CategoryReference(
+                surface_text="服饰运动",
+                candidates=[scope],
+            ),
+        ),
+        _state(
+            QuerySnapshot(
+                category="数码电子",
+                sub_category="智能手机",
+            )
+        ),
+        catalog,
+        resolved_category_scope=scope,
+    )
+
+    assert result.intent == "switch_category"
+    assert result.snapshot == QuerySnapshot(category="服饰运动")
 
 
 def test_semantic_terms_add_and_remove_in_stable_order(

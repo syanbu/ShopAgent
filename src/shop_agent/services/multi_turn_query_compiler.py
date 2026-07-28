@@ -9,6 +9,7 @@ from shop_agent.catalog import ProductCatalog
 from shop_agent.models.conversation import ConversationState, QuerySnapshot
 from shop_agent.models.query import NumericConstraint, ParsedIntent, SearchConstraints
 from shop_agent.models.turn_query import (
+    CategoryCandidate,
     SemanticTermOperation,
     SlotOperation,
     TurnQuery,
@@ -51,6 +52,7 @@ def merge_turn_query(
     *,
     resolved_product_id: str | None = None,
     resolved_brand: str | None = None,
+    resolved_category_scope: CategoryCandidate | None = None,
 ) -> QueryMergeResult:
     """Compile a search turn without mutating the supplied persistent state."""
     intent = _search_intent(turn)
@@ -61,10 +63,22 @@ def merge_turn_query(
         return _clarification_result(intent, base_state, None, str(error))
 
     try:
-        intent = _resolve_search_intent(turn, base_snapshot, base_state, catalog)
+        intent = _resolve_search_intent(
+            turn,
+            base_snapshot,
+            base_state,
+            catalog,
+            resolved_category_scope=resolved_category_scope,
+        )
         if intent == "more_results" and _has_query_mutation(turn, resolved_brand):
             intent = "refine_search"
-        operation_base = QuerySnapshot() if intent == "switch_category" else base_snapshot
+        operation_base = (
+            QuerySnapshot() if intent == "switch_category" else base_snapshot
+        )
+        operation_base = _apply_resolved_category_scope(
+            operation_base,
+            resolved_category_scope,
+        )
         snapshot = _compile_operations(operation_base, turn, catalog)
         snapshot = _apply_resolved_brand(snapshot, turn, resolved_brand)
         snapshot = _apply_relative_price(
@@ -149,19 +163,46 @@ def _resolve_search_intent(
     snapshot: QuerySnapshot,
     state: ConversationState,
     catalog: ProductCatalog,
+    *,
+    resolved_category_scope: CategoryCandidate | None,
 ) -> SearchIntent:
     intent = _search_intent(turn)
     old_snapshot = state.query_snapshot
     if old_snapshot is None:
         return intent
-    new_pair = _target_category_pair(snapshot, turn.slot_operations)
+    new_pair = (
+        (
+            resolved_category_scope.category,
+            resolved_category_scope.sub_category,
+        )
+        if resolved_category_scope is not None
+        else _target_category_pair(snapshot, turn.slot_operations)
+    )
     old_pair = (old_snapshot.category, old_snapshot.sub_category)
-    valid_pairs = {
+    valid_pairs: set[tuple[str, str | None]] = {
         (product.category, product.sub_category) for product in catalog.all()
     }
+    valid_pairs.update(
+        (product.category, None) for product in catalog.all()
+    )
     if new_pair in valid_pairs and new_pair != old_pair:
         return "switch_category"
     return intent
+
+
+def _apply_resolved_category_scope(
+    snapshot: QuerySnapshot,
+    scope: CategoryCandidate | None,
+) -> QuerySnapshot:
+    if scope is None:
+        return snapshot.model_copy(deep=True)
+    return snapshot.model_copy(
+        update={
+            "category": scope.category,
+            "sub_category": scope.sub_category,
+        },
+        deep=True,
+    )
 
 
 def _apply_semantic_operations(

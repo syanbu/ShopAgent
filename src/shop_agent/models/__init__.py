@@ -8,8 +8,11 @@ from shop_agent.models.conversation import (
     QuerySnapshot,
 )
 from shop_agent.models.turn_query import (
+    CategoryCandidate,
+    CategoryReference,
     ProductQuestion,
     ProductReference,
+    ReferenceCandidateMatch,
     SemanticTermOperation,
     SlotOperation,
     TurnCandidateSummary,
@@ -18,11 +21,14 @@ from shop_agent.models.turn_query import (
 
 __all__ = [
     "CandidateReference",
+    "CategoryCandidate",
+    "CategoryReference",
     "ConversationRecord",
     "ConversationState",
     "PendingClarification",
     "ProductQuestion",
     "ProductReference",
+    "ReferenceCandidateMatch",
     "QuerySnapshot",
     "SemanticTermOperation",
     "SlotOperation",

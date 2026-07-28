@@ -4,13 +4,104 @@ from pydantic import ValidationError
 import shop_agent.models as public_models
 from shop_agent.models.query import NumericConstraint
 from shop_agent.models.turn_query import (
+    CategoryCandidate,
+    CategoryReference,
     ProductQuestion,
     ProductReference,
+    ReferenceCandidateMatch,
     SemanticTermOperation,
     SlotOperation,
     TurnCandidateSummary,
     TurnQuery,
 )
+
+
+def test_turn_query_accepts_a_category_reference_with_exact_candidates() -> None:
+    reference = CategoryReference(
+        surface_text="耳机",
+        candidates=[
+            CategoryCandidate(
+                category="数码电子",
+                sub_category="真无线耳机",
+            )
+        ],
+    )
+
+    query = TurnQuery(
+        schema_version=1,
+        intent="new_search",
+        category_reference=reference,
+    )
+
+    assert query.category_reference == reference
+
+
+def test_category_reference_rejects_duplicate_scopes() -> None:
+    with pytest.raises(ValidationError, match="category candidate scopes"):
+        CategoryReference(
+            surface_text="耳机",
+            candidates=[
+                CategoryCandidate(
+                    category="数码电子",
+                    sub_category="真无线耳机",
+                ),
+                CategoryCandidate(
+                    category="数码电子",
+                    sub_category="真无线耳机",
+                ),
+            ],
+        )
+
+
+@pytest.mark.parametrize("surface_text", ["", "   ", "\t"])
+def test_category_reference_rejects_blank_surface_text(surface_text: str) -> None:
+    with pytest.raises(ValidationError):
+        CategoryReference(surface_text=surface_text)
+
+
+def test_category_reference_candidate_defaults_are_independent() -> None:
+    first = CategoryReference(surface_text="耳机")
+    second = CategoryReference(surface_text="手机")
+
+    first.candidates.append(
+        CategoryCandidate(
+            category="数码电子",
+            sub_category="真无线耳机",
+        )
+    )
+
+    assert second.candidates == []
+
+
+@pytest.mark.parametrize("slot", ["category", "sub_category"])
+def test_category_reference_cannot_coexist_with_direct_category_slots(
+    slot: str,
+) -> None:
+    with pytest.raises(ValidationError, match="category_reference"):
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "category_reference": {
+                    "surface_text": "耳机",
+                    "candidates": [
+                        {
+                            "category": "数码电子",
+                            "sub_category": "真无线耳机",
+                        }
+                    ],
+                },
+                "slot_operations": [
+                    {
+                        "slot": slot,
+                        "operation": "replace",
+                        "value": (
+                            "数码电子" if slot == "category" else "真无线耳机"
+                        ),
+                    }
+                ],
+            }
+        )
 
 
 def test_turn_candidate_summary_is_exported_from_models_package() -> None:
@@ -138,6 +229,56 @@ def test_product_reference_accepts_kind_specific_clues() -> None:
 
     assert ordinal.ordinal == 2
     assert brand.brand == "小米"
+
+
+def test_reference_candidate_match_normalizes_opaque_product_id() -> None:
+    match = ReferenceCandidateMatch(product_id=" p2 ", matches=True)
+
+    assert match.product_id == "p2"
+    assert match.matches is True
+
+
+@pytest.mark.parametrize("product_id", ["", "   ", 1, None])
+def test_reference_candidate_match_rejects_invalid_product_id(
+    product_id: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        ReferenceCandidateMatch(product_id=product_id, matches=True)
+
+
+def test_product_reference_requires_unique_candidate_match_ids() -> None:
+    with pytest.raises(ValidationError, match="candidate match product IDs"):
+        ProductReference(
+            target_type="product",
+            surface_text="小米那个",
+            kind="brand",
+            brand="小米",
+            candidate_matches=[
+                ReferenceCandidateMatch(product_id="p1", matches=True),
+                ReferenceCandidateMatch(product_id="p1", matches=False),
+            ],
+        )
+
+
+def test_product_reference_candidate_match_defaults_are_independent() -> None:
+    first = ProductReference(
+        target_type="product",
+        surface_text="第二个",
+        kind="ordinal",
+        ordinal=2,
+    )
+    second = ProductReference(
+        target_type="product",
+        surface_text="第三个",
+        kind="ordinal",
+        ordinal=3,
+    )
+
+    first.candidate_matches.append(
+        ReferenceCandidateMatch(product_id="p2", matches=True)
+    )
+
+    assert second.candidate_matches == []
 
 
 @pytest.mark.parametrize(

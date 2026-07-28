@@ -159,14 +159,15 @@ async def test_compiled_http_generation_failure_persists_candidates_for_follow_u
             {
                 "schema_version": 1,
                 "intent": "new_search",
-                "slot_operations": [
-                    {"slot": "category", "operation": "replace", "value": "数码电子"},
-                    {
-                        "slot": "sub_category",
-                        "operation": "replace",
-                        "value": "蓝牙耳机",
-                    },
-                ],
+                "category_reference": {
+                    "surface_text": "蓝牙耳机",
+                    "candidates": [
+                        {
+                            "category": "数码电子",
+                            "sub_category": "蓝牙耳机",
+                        }
+                    ],
+                },
             }
         ),
         TurnQuery.model_validate(
@@ -525,6 +526,220 @@ async def test_compiled_http_dialogue_persists_focus_for_follow_up_pronoun(
         "p3",
     ]
     assert saved.state.seen_product_ids == ["p1", "p2", "p3"]
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_more_results_exhaustion_preserves_follow_up_reference(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "more_results",
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "第一个",
+                    "kind": "ordinal",
+                    "ordinal": 1,
+                },
+                "product_question": {
+                    "text": "第一个多少钱",
+                    "kind": "structured",
+                    "field": "display_price",
+                },
+            }
+        ),
+    ]
+    dependencies, parser, repository, _, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=turns,
+        response_generator=SequencedResponseGenerator(["首轮推荐", "第一个商品的价格"]),
+    )
+
+    first = await _post(
+        dependencies,
+        {"conversation_id": "exhausted-results", "message": "推荐蓝牙耳机"},
+    )
+    exhausted = await _post(
+        dependencies,
+        {"conversation_id": "exhausted-results", "message": "还有别的吗"},
+    )
+
+    assert "product" in [event.name for event in parse_sse(first.text)]
+    events = parse_sse(exhausted.text)
+    assert [event.name for event in events] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert events[1].data["delta"] == "当前条件下没有更多符合要求的商品了。"
+    assert events[-1].data["status"] == "completed"
+
+    saved = await repository.load("exhausted-results")
+    assert saved is not None
+    assert [item.product_id for item in saved.state.recent_candidates] == [
+        "p1",
+        "p2",
+        "p3",
+    ]
+    assert saved.state.focused_product_id is None
+    assert saved.state.seen_product_ids == ["p1", "p2", "p3"]
+    assert saved.state.query_snapshot is not None
+    assert saved.state.query_snapshot.category == "数码电子"
+    assert saved.state.query_snapshot.sub_category == "蓝牙耳机"
+
+    followed_up = await _post(
+        dependencies,
+        {"conversation_id": "exhausted-results", "message": "第一个多少钱"},
+    )
+
+    follow_up_events = parse_sse(followed_up.text)
+    assert [event.name for event in follow_up_events] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert follow_up_events[-1].data["status"] == "completed"
+    assert [item.product_id for item in parser.contexts[2].recent_candidates] == [
+        "p1",
+        "p2",
+        "p3",
+    ]
+    saved = await repository.load("exhausted-results")
+    assert saved is not None
+    assert saved.state.focused_product_id == "p1"
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_unsupported_category_skips_retrieval_and_uses_fixed_text(
+    tmp_path: Path,
+) -> None:
+    turn = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "new_search",
+            "category_reference": {
+                "surface_text": "相机",
+                "candidates": [],
+            },
+        }
+    )
+    dependencies, _, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=[turn],
+    )
+
+    response = await _post(
+        dependencies,
+        {"conversation_id": "unsupported-category", "message": "推荐相机"},
+    )
+
+    events = parse_sse(response.text)
+    assert [event.name for event in events] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert (
+        events[1].data["delta"]
+        == "当前商品目录暂不支持“相机”，请换一种商品类型。"
+    )
+    assert retrieval.calls == []
+    saved = await repository.load("unsupported-category")
+    assert saved is not None
+    assert saved.state.pending_clarification is None
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_brand_wording_resolves_matched_product_id(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "brand",
+                    "surface_text": "测试品牌 3 这个",
+                    "kind": "brand",
+                    "brand": "测试品牌 3",
+                    "candidate_matches": [
+                        {"product_id": "p1", "matches": False},
+                        {"product_id": "p2", "matches": False},
+                        {"product_id": "p3", "matches": True},
+                    ],
+                },
+                "product_question": {
+                    "text": "测试品牌 3 这个不错",
+                    "kind": "structured",
+                    "field": "title",
+                },
+            }
+        ),
+    ]
+    dependencies, parser, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=turns,
+    )
+
+    displayed = await _post(
+        dependencies,
+        {"conversation_id": "brand-reference", "message": "展示三款"},
+    )
+    followed_up = await _post(
+        dependencies,
+        {"conversation_id": "brand-reference", "message": "测试品牌 3 这个不错"},
+    )
+
+    assert "product" in [event.name for event in parse_sse(displayed.text)]
+    events = parse_sse(followed_up.text)
+    assert [event.name for event in events] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert events[-1].data["status"] == "completed"
+    assert retrieval.calls.__len__() == 1
+    assert parser.contexts[1].recent_candidates[2].product_id == "p3"
+    saved = await repository.load("brand-reference")
+    assert saved is not None
+    assert saved.state.focused_product_id == "p3"
 
 
 @pytest.mark.asyncio

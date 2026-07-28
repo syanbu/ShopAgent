@@ -14,7 +14,14 @@ from shop_agent.models.retrieval import (
     SelectedProduct,
     ValidatedCandidate,
 )
-from shop_agent.models.turn_query import TurnQuery
+from shop_agent.models.turn_query import CategoryCandidate, TurnQuery
+
+
+NoResultReason = Literal[
+    "exhausted",
+    "no_matches",
+    "insufficient_evidence",
+]
 
 
 class ShoppingState(TypedDict, total=False):
@@ -26,6 +33,8 @@ class ShoppingState(TypedDict, total=False):
     turn_query: TurnQuery
     resolved_product_id: str
     resolved_brand: str
+    resolved_category_scope: CategoryCandidate
+    allowed_category_scopes: tuple[CategoryCandidate, ...]
     query_snapshot: QuerySnapshot
     search_intent: Literal[
         "new_search",
@@ -44,5 +53,6 @@ class ShoppingState(TypedDict, total=False):
     validated_candidates: list[ValidatedCandidate]
     selected_products: list[SelectedProduct]
     response_mode: Literal["shopping", "non_shopping", "no_results", "clarification"]
+    no_result_reason: NoResultReason
     response_text: str
     error_code: ErrorCode

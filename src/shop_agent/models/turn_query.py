@@ -63,6 +63,61 @@ class TurnCandidateSummary(BaseModel):
     brand: str = Field(min_length=1)
 
 
+class CategoryCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    category: str = Field(min_length=1)
+    sub_category: str | None = None
+
+    @field_validator("category", "sub_category", mode="before")
+    @classmethod
+    def normalize_taxonomy_value(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+
+class CategoryReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    surface_text: str = Field(min_length=1)
+    candidates: list[CategoryCandidate] = Field(default_factory=list)
+
+    @field_validator("surface_text", mode="before")
+    @classmethod
+    def normalize_surface_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_unique_candidate_scopes(self) -> "CategoryReference":
+        scopes = [
+            (candidate.category, candidate.sub_category)
+            for candidate in self.candidates
+        ]
+        if len(scopes) != len(set(scopes)):
+            raise ValueError("category candidate scopes must be unique")
+        return self
+
+
+class ReferenceCandidateMatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product_id: str = Field(min_length=1)
+    matches: bool
+
+    @field_validator("product_id", mode="before")
+    @classmethod
+    def normalize_product_id(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("candidate match product IDs must be strings")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("candidate match product IDs cannot be blank")
+        return normalized
+
+
 class ProductReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -72,6 +127,7 @@ class ProductReference(BaseModel):
     ordinal: int | None = Field(default=None, ge=1)
     brand: str | None = None
     product_name: str | None = None
+    candidate_matches: list[ReferenceCandidateMatch] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_reference_clue(self) -> "ProductReference":
@@ -81,6 +137,9 @@ class ProductReference(BaseModel):
             raise ValueError("brand is required only for brand references")
         if (self.kind == "product_name") != (self.product_name is not None):
             raise ValueError("product_name is required only for product_name references")
+        product_ids = [item.product_id for item in self.candidate_matches]
+        if len(product_ids) != len(set(product_ids)):
+            raise ValueError("candidate match product IDs must be unique")
         return self
 
 
@@ -165,6 +224,7 @@ class TurnQuery(BaseModel):
     schema_version: Literal[1]
     intent: TurnIntent
     reference: ProductReference | None = None
+    category_reference: CategoryReference | None = None
     semantic_term_operations: list[SemanticTermOperation] = Field(default_factory=list)
     slot_operations: list[SlotOperation] = Field(default_factory=list)
     relative_price: RelativePriceDirection | None = None
@@ -175,6 +235,13 @@ class TurnQuery(BaseModel):
     def validate_turn_contract(self) -> "TurnQuery":
         if (self.intent == "product_question") != (self.product_question is not None):
             raise ValueError("product_question is required only for product_question intent")
+        if self.category_reference is not None and any(
+            operation.slot in {"category", "sub_category"}
+            for operation in self.slot_operations
+        ):
+            raise ValueError(
+                "category_reference cannot coexist with direct category slots"
+            )
 
         scalar_slots: set[str] = set()
         cleared_collection_slots: set[str] = set()

@@ -16,7 +16,14 @@ from shop_agent.models.conversation import (
 )
 from shop_agent.models.query import NumericConstraint, SearchConstraints
 from shop_agent.models.retrieval import EvidenceChunk
-from shop_agent.models.turn_query import ProductQuestion, ProductReference, TurnQuery
+from shop_agent.models.turn_query import (
+    CategoryCandidate,
+    CategoryReference,
+    ProductQuestion,
+    ProductReference,
+    ReferenceCandidateMatch,
+    TurnQuery,
+)
 from shop_agent.services.multi_turn_query_compiler import merge_turn_query
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
@@ -83,6 +90,30 @@ def _reference(
             "kind": kind,
             "ordinal": ordinal,
         }
+    )
+
+
+def _matched_reference(
+    *matched_product_ids: str,
+    target_type: str = "product",
+    surface_text: str = "那个",
+    kind: str = "demonstrative",
+    ordinal: int | None = None,
+    brand: str | None = None,
+) -> ProductReference:
+    return ProductReference(
+        target_type=target_type,
+        surface_text=surface_text,
+        kind=kind,
+        ordinal=ordinal,
+        brand=brand,
+        candidate_matches=[
+            ReferenceCandidateMatch(
+                product_id=f"p{index}",
+                matches=f"p{index}" in matched_product_ids,
+            )
+            for index in range(1, 4)
+        ],
     )
 
 
@@ -177,6 +208,35 @@ def _search_turn(
     )
 
 
+def _category_turn(
+    *,
+    surface_text: str,
+    candidates: list[CategoryCandidate],
+    intent: str = "new_search",
+    max_price: float | None = None,
+) -> TurnQuery:
+    slot_operations: list[dict[str, object]] = []
+    if max_price is not None:
+        slot_operations.append(
+            {
+                "slot": "constraints.max_price",
+                "operation": "replace",
+                "value": max_price,
+            }
+        )
+    return TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": intent,
+            "category_reference": CategoryReference(
+                surface_text=surface_text,
+                candidates=candidates,
+            ),
+            "slot_operations": slot_operations,
+        }
+    )
+
+
 async def _drain_graph(
     dependencies: WorkflowDependencies,
     message: str,
@@ -187,6 +247,243 @@ async def _drain_graph(
             initial_state(message), stream_mode="custom", version="v2"
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_unique_category_reference_retrieves_only_the_resolved_scope(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(
+        tmp_path,
+        product_count=3,
+        product_pairs=[
+            ("数码电子", "真无线耳机"),
+            ("数码电子", "真无线耳机"),
+            ("数码电子", "智能手机"),
+        ],
+    )
+    earphones = CategoryCandidate(
+        category="数码电子",
+        sub_category="真无线耳机",
+    )
+
+    await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser(
+                [_category_turn(surface_text="耳机", candidates=[earphones])]
+            ),
+            harness.repository,
+        ),
+        "推荐耳机",
+    )
+
+    assert len(harness.retrieval.retrieve_calls) == 1
+    call = harness.retrieval.retrieve_calls[0]
+    assert call.intent.category == "数码电子"
+    assert call.intent.sub_category == "真无线耳机"
+    assert harness.repository.record is not None
+    assert harness.repository.record.state.query_snapshot == QuerySnapshot(
+        category="数码电子",
+        sub_category="真无线耳机",
+    )
+    assert harness.repository.record.state.seen_product_ids == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_category_persists_candidates_and_skips_retrieval(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(
+        tmp_path,
+        product_count=2,
+        product_pairs=[
+            ("服饰运动", "篮球鞋"),
+            ("服饰运动", "跑步鞋"),
+        ],
+    )
+    candidates = [
+        CategoryCandidate(category="服饰运动", sub_category="篮球鞋"),
+        CategoryCandidate(category="服饰运动", sub_category="跑步鞋"),
+    ]
+
+    events = await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser(
+                [_category_turn(surface_text="鞋", candidates=candidates)]
+            ),
+            harness.repository,
+        ),
+        "推荐鞋",
+    )
+
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.repository.record is not None
+    pending = harness.repository.record.state.pending_clarification
+    assert pending is not None
+    assert pending.kind == "ambiguous_category"
+    assert pending.candidate_category_scopes == tuple(candidates)
+    delta = events[0]["data"]["data"]["delta"]
+    assert "篮球鞋" in delta
+    assert "跑步鞋" in delta
+
+
+@pytest.mark.asyncio
+async def test_category_clarification_resumes_suspended_budget(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(
+        tmp_path,
+        product_count=2,
+        product_pairs=[
+            ("服饰运动", "篮球鞋"),
+            ("服饰运动", "跑步鞋"),
+        ],
+        price_start=399,
+    )
+    repository = FakeConversationRepository()
+    basketball = CategoryCandidate(
+        category="服饰运动",
+        sub_category="篮球鞋",
+    )
+    running = CategoryCandidate(
+        category="服饰运动",
+        sub_category="跑步鞋",
+    )
+
+    await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser(
+                [
+                    _category_turn(
+                        surface_text="鞋",
+                        candidates=[basketball, running],
+                        max_price=500,
+                    )
+                ]
+            ),
+            repository,
+        ),
+        "推荐500元以内的鞋",
+    )
+    await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser(
+                [
+                    _category_turn(
+                        surface_text="跑步鞋",
+                        candidates=[running],
+                        intent="clarification_answer",
+                    )
+                ]
+            ),
+            repository,
+        ),
+        "跑步鞋",
+    )
+
+    assert len(harness.retrieval.retrieve_calls) == 1
+    call = harness.retrieval.retrieve_calls[0]
+    assert call.intent.sub_category == "跑步鞋"
+    assert call.intent.constraints.max_price == 500
+    assert repository.record is not None
+    assert repository.record.state.pending_clarification is None
+
+
+@pytest.mark.asyncio
+async def test_category_clarification_answer_cannot_escape_pending_scopes(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(
+        tmp_path,
+        product_count=3,
+        product_pairs=[
+            ("服饰运动", "篮球鞋"),
+            ("服饰运动", "跑步鞋"),
+            ("数码电子", "真无线耳机"),
+        ],
+    )
+    repository = FakeConversationRepository()
+    basketball = CategoryCandidate(
+        category="服饰运动",
+        sub_category="篮球鞋",
+    )
+    running = CategoryCandidate(
+        category="服饰运动",
+        sub_category="跑步鞋",
+    )
+    earphones = CategoryCandidate(
+        category="数码电子",
+        sub_category="真无线耳机",
+    )
+
+    await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser(
+                [
+                    _category_turn(
+                        surface_text="鞋",
+                        candidates=[basketball, running],
+                    )
+                ]
+            ),
+            repository,
+        ),
+        "推荐鞋",
+    )
+    events = await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser(
+                [
+                    _category_turn(
+                        surface_text="耳机",
+                        candidates=[earphones],
+                        intent="clarification_answer",
+                    )
+                ]
+            ),
+            repository,
+        ),
+        "耳机",
+    )
+
+    assert harness.retrieval.retrieve_calls == []
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert "重新完整描述" in events[0]["data"]["data"]["delta"]
+    assert repository.record is not None
+    assert repository.record.state.pending_clarification is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_unsupported_category_skips_retrieval(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+
+    events = await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser(
+                [_category_turn(surface_text="相机", candidates=[])]
+            ),
+            harness.repository,
+        ),
+        "推荐相机",
+    )
+
+    assert harness.retrieval.retrieve_calls == []
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert (
+        events[0]["data"]["data"]["delta"]
+        == "当前商品目录暂不支持“相机”，请换一种商品类型。"
+    )
+    assert harness.repository.record is not None
 
 
 async def _load_and_parse(
@@ -727,7 +1024,11 @@ async def test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent(
     cheaper = await _observe_acceptance_turn(graph, harness, repository, "再便宜一点")
 
     _assert_acceptance_search_turn(displayed, ("p1", "p2", "p3"))
-    _assert_acceptance_search_turn(cheaper, ())
+    assert cheaper.event_names == ("text_delta",)
+    assert cheaper.product_ids == ()
+    assert cheaper.save_count == 1
+    assert cheaper.event_save_counts == (1,)
+    assert cheaper.response_count == 0
     assert [item.display_price for item in displayed.state.recent_candidates] == [
         399,
         459,
@@ -978,6 +1279,105 @@ async def test_ambiguous_reference_persists_before_one_text_event_and_calls_noth
     assert harness.evidence.validate_calls == []
     assert harness.evidence.select_calls == []
     assert harness.response.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_product_question_brand_wording_resolves_unique_matched_product(
+    tmp_path: Path,
+) -> None:
+    turn = _turn(
+        "product_question",
+        reference=_matched_reference(
+            "p3",
+            target_type="brand",
+            surface_text="品牌 3 这个",
+            kind="brand",
+            brand="品牌 3",
+        ),
+        question=_structured_question("title", "品牌 3 这个不错"),
+    )
+    record = ConversationRecord(state=_conversation(), version=4)
+    harness, dependencies, _, repository = _dependencies(
+        tmp_path, turns=[turn], record=record
+    )
+
+    events = await _drain_graph(dependencies, "品牌 3 这个不错")
+
+    assert [part["data"]["event"] for part in events] == [
+        "text_delta",
+        "text_delta",
+    ]
+    assert harness.retrieval.fetch_product_calls == []
+    assert repository.record is not None
+    assert repository.record.state.focused_product_id == "p3"
+    assert '"product_id":"p3"' in harness.response.prompts[0]
+    assert '"title":"通勤耳机 3"' in harness.response.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_candidate_matrix_ambiguity_persists_only_matched_products(
+    tmp_path: Path,
+) -> None:
+    turn = _turn(
+        "product_question",
+        reference=_matched_reference(
+            "p1",
+            "p2",
+            surface_text="小米那个",
+            kind="brand",
+            brand="小米",
+        ),
+        question=_semantic_question("小米那个怎么样"),
+    )
+    record = ConversationRecord(state=_conversation(), version=4)
+    harness, dependencies, _, repository = _dependencies(
+        tmp_path, turns=[turn], record=record
+    )
+
+    events = await _drain_graph(dependencies, "小米那个怎么样")
+
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert repository.record is not None
+    pending = repository.record.state.pending_clarification
+    assert pending is not None
+    assert pending.candidate_product_ids == ("p1", "p2")
+    message = events[0]["data"]["data"]["delta"]
+    assert "第一款" in message
+    assert "第二款" in message
+    assert "第三款" not in message
+    assert harness.retrieval.fetch_product_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_subset_blocks_clarification_answer_escape(
+    tmp_path: Path,
+) -> None:
+    pending = _pending().model_copy(
+        update={"candidate_product_ids": ("p1", "p2")},
+        deep=True,
+    )
+    answer = _turn(
+        "clarification_answer",
+        reference=_matched_reference(
+            "p3",
+            surface_text="第三个",
+            kind="ordinal",
+            ordinal=3,
+        ),
+    )
+    record = ConversationRecord(state=_conversation(pending=pending), version=5)
+    harness, dependencies, _, repository = _dependencies(
+        tmp_path, turns=[answer], record=record
+    )
+
+    events = await _drain_graph(dependencies, "第三个")
+
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert "重新完整描述" in events[0]["data"]["data"]["delta"]
+    assert harness.retrieval.fetch_product_calls == []
+    assert repository.record is not None
+    assert repository.record.state.pending_clarification is None
+    assert repository.record.state.focused_product_id is None
 
 
 @pytest.mark.asyncio
@@ -3069,12 +3469,28 @@ async def test_product_question_clear_save_failure_emits_no_text(tmp_path: Path)
     assert events == []
 
 
-@pytest.mark.parametrize(("return_hits", "eligible"), [(False, True), (True, False)])
+@pytest.mark.parametrize(
+    ("return_hits", "eligible", "expected_message"),
+    [
+        (
+            False,
+            True,
+            "当前筛选条件下没有找到匹配商品，建议您放宽或修改筛选条件。",
+        ),
+        (
+            True,
+            False,
+            "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
+            "建议您调整筛选条件。",
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_no_result_paths_persist_before_text_and_clear_latest_focus(
     tmp_path: Path,
     return_hits: bool,
     eligible: bool,
+    expected_message: str,
 ) -> None:
     harness = build_harness(
         tmp_path,
@@ -3086,10 +3502,12 @@ async def test_no_result_paths_persist_before_text_and_clear_latest_focus(
     )
     parser = FakeTurnQueryParser([_search_turn("refine_search")])
 
-    events = await _drain_graph(
-        _workflow_dependencies(harness, parser, repository),
-        "继续筛选",
-    )
+    events: list[dict[str, Any]] = []
+    async for part in build_graph(
+        _workflow_dependencies(harness, parser, repository)
+    ).astream(initial_state("继续筛选"), stream_mode="custom", version="v2"):
+        assert repository.trace == ["persist"]
+        events.append(part)
 
     assert repository.record is not None
     persisted = repository.record.state
@@ -3099,10 +3517,15 @@ async def test_no_result_paths_persist_before_text_and_clear_latest_focus(
     assert persisted.seen_product_ids == []
     assert repository.trace == ["persist"]
     assert all(part["data"]["event"] != "product" for part in events)
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == expected_message
+    assert harness.response.prompts == []
 
 
 @pytest.mark.asyncio
-async def test_failed_more_results_preserves_seen_ids(tmp_path: Path) -> None:
+async def test_failed_more_results_preserves_latest_reference_context(
+    tmp_path: Path,
+) -> None:
     harness = build_harness(tmp_path, return_hits=False)
     stored = _conversation(focus="p2")
     repository = FakeConversationRepository(
@@ -3110,15 +3533,94 @@ async def test_failed_more_results_preserves_seen_ids(tmp_path: Path) -> None:
     )
     parser = FakeTurnQueryParser([_search_turn("more_results")])
 
-    await _drain_graph(
+    events = await _drain_graph(
         _workflow_dependencies(harness, parser, repository),
         "换一批",
     )
 
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == (
+        "当前条件下没有更多符合要求的商品了。"
+    )
+    assert harness.response.prompts == []
     assert repository.record is not None
     assert repository.record.state.seen_product_ids == stored.seen_product_ids
+    assert repository.record.state.recent_candidates == stored.recent_candidates
+    assert repository.record.state.focused_product_id == stored.focused_product_id
+
+
+@pytest.mark.asyncio
+async def test_empty_final_selection_uses_insufficient_evidence_response(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    parser = FakeTurnQueryParser(
+        [
+            _search_turn(
+                "new_search",
+                [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                    {
+                        "slot": "constraints.max_price",
+                        "operation": "replace",
+                        "value": 0,
+                    },
+                ],
+            )
+        ]
+    )
+    repository = FakeConversationRepository()
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "找零元耳机",
+    )
+
+    assert harness.evidence.validate_calls
+    assert harness.evidence.select_calls
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == (
+        "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
+        "建议您调整筛选条件。"
+    )
+    assert harness.response.prompts == []
+    assert repository.record is not None
     assert repository.record.state.recent_candidates == []
-    assert repository.record.state.focused_product_id is None
+
+
+@pytest.mark.asyncio
+async def test_more_results_with_only_ineligible_remaining_products_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path, product_count=6, eligible=False)
+    stored = _conversation()
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=2)
+    )
+    parser = FakeTurnQueryParser([_search_turn("more_results")])
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "换一批",
+    )
+
+    assert harness.retrieval.retrieve_calls[0].excluded_product_ids == (
+        "p-old",
+        "p1",
+        "p2",
+        "p3",
+    )
+    assert harness.evidence.validate_calls
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == (
+        "当前条件下没有更多符合要求的商品了。"
+    )
+    assert harness.response.prompts == []
 
 
 @pytest.mark.asyncio

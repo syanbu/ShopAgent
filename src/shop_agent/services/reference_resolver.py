@@ -1,10 +1,20 @@
 """Deterministically resolve references within the latest candidate batch."""
 
+from collections.abc import Sequence
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shop_agent.catalog import ProductCatalog
-from shop_agent.models import CandidateReference, ConversationState, ProductReference
+from shop_agent.models import (
+    CandidateReference,
+    CategoryCandidate,
+    CategoryReference,
+    ConversationState,
+    ProductReference,
+)
 from shop_agent.models.product import Product
+from shop_agent.models.turn_query import ReferenceTarget
 
 
 class ReferenceResolution(BaseModel):
@@ -33,10 +43,105 @@ class ReferenceResolution(BaseModel):
         return self
 
 
+class CategoryResolution(BaseModel):
+    """A trusted Catalog scope or a deterministic non-search outcome."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["resolved", "ambiguous", "unsupported"]
+    scope: CategoryCandidate | None = None
+    candidate_scopes: list[CategoryCandidate] = Field(default_factory=list)
+    message: str | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution_state(self) -> "CategoryResolution":
+        if self.outcome == "resolved":
+            if (
+                self.scope is None
+                or self.candidate_scopes
+                or self.message is not None
+            ):
+                raise ValueError("resolved category requires only one scope")
+        elif self.outcome == "ambiguous":
+            if (
+                self.scope is not None
+                or len(self.candidate_scopes) < 2
+                or self.message is None
+            ):
+                raise ValueError(
+                    "ambiguous category requires multiple scopes and a message"
+                )
+        elif (
+            self.scope is not None
+            or self.candidate_scopes
+            or self.message is None
+        ):
+            raise ValueError("unsupported category requires only a message")
+        return self
+
+
+def resolve_category_reference(
+    reference: CategoryReference,
+    catalog: ProductCatalog,
+    *,
+    allowed_scopes: Sequence[CategoryCandidate] | None = None,
+) -> CategoryResolution:
+    """Resolve model-understood category candidates inside the Catalog domain."""
+    products = catalog.all()
+    valid_scopes = {
+        *((product.category, None) for product in products),
+        *((product.category, product.sub_category) for product in products),
+    }
+    submitted = [
+        (candidate.category, candidate.sub_category)
+        for candidate in reference.candidates
+    ]
+    if any(scope not in valid_scopes for scope in submitted):
+        return _unsupported_category(reference.surface_text)
+
+    allowed = (
+        None
+        if allowed_scopes is None
+        else {
+            (candidate.category, candidate.sub_category)
+            for candidate in allowed_scopes
+        }
+    )
+    candidates = [
+        candidate.model_copy(deep=True)
+        for candidate in reference.candidates
+        if allowed is None
+        or (candidate.category, candidate.sub_category) in allowed
+    ]
+    if len(candidates) == 1:
+        return CategoryResolution(outcome="resolved", scope=candidates[0])
+    if len(candidates) > 1:
+        labels = [
+            candidate.sub_category or candidate.category
+            for candidate in candidates
+        ]
+        return CategoryResolution(
+            outcome="ambiguous",
+            candidate_scopes=candidates,
+            message=f"你说的是{'、'.join(labels)}中的哪一种？",
+        )
+    return _unsupported_category(reference.surface_text)
+
+
+def _unsupported_category(surface_text: str) -> CategoryResolution:
+    return CategoryResolution(
+        outcome="unsupported",
+        message=f"当前商品目录暂不支持“{surface_text}”，请换一种商品类型。",
+    )
+
+
 def resolve_reference(
     reference: ProductReference,
     state: ConversationState,
     catalog: ProductCatalog,
+    *,
+    expected_target_type: ReferenceTarget | None = None,
+    allowed_product_ids: Sequence[str] | None = None,
 ) -> ReferenceResolution:
     """Resolve only against products shown in the latest candidate batch."""
     latest_products = [
@@ -44,13 +149,83 @@ def resolve_reference(
         for candidate in state.recent_candidates
     ]
 
-    if reference.target_type == "brand":
-        return _resolve_brand_reference(reference, state, latest_products)
+    if not reference.candidate_matches:
+        return _resolve_legacy_reference(
+            reference,
+            state,
+            latest_products,
+            expected_target_type=expected_target_type,
+            allowed_product_ids=allowed_product_ids,
+        )
 
-    matches = _resolve_product_matches(reference, state, latest_products)
+    latest_ids = [candidate.product_id for candidate, _ in latest_products]
+    matrix_ids = [item.product_id for item in reference.candidate_matches]
+    if matrix_ids != latest_ids:
+        return _clarification(_allowed_scope(latest_products, allowed_product_ids))
+
+    allowed_ids = (
+        set(latest_ids)
+        if allowed_product_ids is None
+        else set(allowed_product_ids)
+    )
+    matched_ids = {
+        item.product_id
+        for item in reference.candidate_matches
+        if item.matches and item.product_id in allowed_ids
+    }
+    matches = [
+        (candidate, product)
+        for candidate, product in latest_products
+        if candidate.product_id in matched_ids
+    ]
+    target_type = expected_target_type or reference.target_type
+
+    if target_type == "brand":
+        brands = {product.brand for _, product in matches}
+        if len(brands) == 1:
+            return ReferenceResolution(brand=next(iter(brands)))
+    elif len(matches) == 1:
+        return ReferenceResolution(product_id=matches[0][0].product_id)
+
+    clarification_scope = matches or _allowed_scope(
+        latest_products,
+        allowed_product_ids,
+    )
+    return _clarification(clarification_scope)
+
+
+def _resolve_legacy_reference(
+    reference: ProductReference,
+    state: ConversationState,
+    latest_products: list[tuple[CandidateReference, Product]],
+    *,
+    expected_target_type: ReferenceTarget | None,
+    allowed_product_ids: Sequence[str] | None,
+) -> ReferenceResolution:
+    allowed_products = _allowed_scope(latest_products, allowed_product_ids)
+    target_type = expected_target_type or reference.target_type
+    if target_type == "brand":
+        return _resolve_brand_reference(reference, state, allowed_products)
+    matches = _resolve_product_matches(reference, state, allowed_products)
+    allowed_ids = {candidate.product_id for candidate, _ in allowed_products}
+    matches = [product_id for product_id in matches if product_id in allowed_ids]
     if len(matches) == 1:
         return ReferenceResolution(product_id=matches[0])
-    return _clarification(latest_products)
+    return _clarification(allowed_products)
+
+
+def _allowed_scope(
+    latest_products: list[tuple[CandidateReference, Product]],
+    allowed_product_ids: Sequence[str] | None,
+) -> list[tuple[CandidateReference, Product]]:
+    if allowed_product_ids is None:
+        return latest_products
+    allowed = set(allowed_product_ids)
+    return [
+        (candidate, product)
+        for candidate, product in latest_products
+        if candidate.product_id in allowed
+    ]
 
 
 def _resolve_brand_reference(

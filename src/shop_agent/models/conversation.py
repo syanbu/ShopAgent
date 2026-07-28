@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shop_agent.models.query import ParsedIntent, SearchConstraints
-from shop_agent.models.turn_query import TurnQuery
+from shop_agent.models.turn_query import CategoryCandidate, TurnQuery
 
 
 def _normalize_product_id(value: object) -> str:
@@ -70,8 +70,14 @@ class CandidateReference(BaseModel):
 class PendingClarification(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    kind: Literal["ambiguous_reference", "missing_context", "condition_conflict"]
+    kind: Literal[
+        "ambiguous_reference",
+        "ambiguous_category",
+        "missing_context",
+        "condition_conflict",
+    ]
     candidate_product_ids: tuple[str, ...] = ()
+    candidate_category_scopes: tuple[CategoryCandidate, ...] = ()
     suspended_turn_query: TurnQuery
     attempt_count: int = Field(default=1, ge=1, le=2)
 
@@ -82,6 +88,20 @@ class PendingClarification(BaseModel):
         value: list[str] | tuple[str, ...],
     ) -> tuple[str, ...]:
         return tuple(_normalize_product_ids(value))
+
+    @field_validator("candidate_category_scopes")
+    @classmethod
+    def validate_candidate_category_scopes(
+        cls,
+        value: tuple[CategoryCandidate, ...],
+    ) -> tuple[CategoryCandidate, ...]:
+        scopes = [
+            (candidate.category, candidate.sub_category)
+            for candidate in value
+        ]
+        if len(scopes) != len(set(scopes)):
+            raise ValueError("category scopes must be unique")
+        return value
 
 
 class ConversationState(BaseModel):

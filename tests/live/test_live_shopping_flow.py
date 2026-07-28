@@ -36,6 +36,7 @@ from shop_agent.services.qdrant_store import QdrantStore
 from shop_agent.services.retrieval import RetrievalService
 from shop_agent.services.multi_turn_query_compiler import merge_turn_query
 from shop_agent.services.ports import TurnContext
+from shop_agent.services.reference_resolver import resolve_category_reference
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 from tests.integration.api_fakes import ParsedSseEvent, parse_sse
@@ -46,6 +47,26 @@ pytestmark = [
     pytest.mark.skipif(
         os.getenv("RUN_LIVE_TESTS") != "1",
         reason="set RUN_LIVE_TESTS=1 to call real services",
+    ),
+]
+
+_CATEGORY_REFERENCE_CASES = [
+    ("耳机", {("数码电子", "真无线耳机")}),
+    ("手机", {("数码电子", "智能手机")}),
+    (
+        "鞋",
+        {
+            ("服饰运动", "徒步鞋"),
+            ("服饰运动", "篮球鞋"),
+            ("服饰运动", "跑步鞋"),
+        },
+    ),
+    (
+        "T恤",
+        {
+            ("服饰运动", "短袖T恤"),
+            ("服饰运动", "速干T恤"),
+        },
     ),
 ]
 
@@ -123,6 +144,47 @@ class CapturingEvidenceService:
             limit,
             constraints=constraints,
         )
+
+
+@pytest.mark.parametrize(
+    ("surface_text", "expected_scopes"),
+    _CATEGORY_REFERENCE_CASES,
+    ids=["earphone", "phone", "shoes", "tshirt"],
+)
+@pytest.mark.parametrize("attempt", range(5), ids=lambda value: f"attempt-{value + 1}")
+@pytest.mark.asyncio
+async def test_live_category_reference_candidate_stability(
+    surface_text: str,
+    expected_scopes: set[tuple[str, str]],
+    attempt: int,
+) -> None:
+    del attempt
+    settings = Settings()  # type: ignore[call-arg]
+    if not settings.dashscope_api_key.strip():
+        pytest.fail("DASHSCOPE_API_KEY is required for live tests")
+    catalog = ProductCatalog.load(settings.dataset_root)
+    parser = DashScopeTurnQueryParser(
+        settings,
+        categories=[product.category for product in catalog.all()],
+        sub_categories=[product.sub_category for product in catalog.all()],
+        category_pairs=[
+            (product.category, product.sub_category)
+            for product in catalog.all()
+        ],
+        brands=catalog.brands(),
+        sku_taxonomy=catalog.sku_taxonomy(),
+    )
+
+    parsed = await parser.parse(
+        f"推荐{surface_text}",
+        TurnContext(),
+    )
+
+    assert parsed.category_reference is not None
+    assert {
+        (candidate.category, candidate.sub_category)
+        for candidate in parsed.category_reference.candidates
+    } == expected_scopes
 
 
 @pytest.mark.asyncio
@@ -286,29 +348,46 @@ async def _assert_live_turn_query_parser_contracts(
     ordinal = await parser.parse("第二个怎么样", context)
     assert ordinal.intent == "product_question"
     assert ordinal.reference is not None
-    assert ordinal.reference.kind == "ordinal"
-    assert ordinal.reference.ordinal == 2
+    assert [
+        item.product_id for item in ordinal.reference.candidate_matches
+    ] == [product.product_id for product in earphones]
+    assert [
+        item.product_id
+        for item in ordinal.reference.candidate_matches
+        if item.matches
+    ] == [earphones[1].product_id]
 
     brand = await parser.parse("那个小米的", context)
     assert brand.reference is not None
-    assert brand.reference.kind == "brand"
-    assert brand.reference.brand == "小米"
+    assert [
+        item.product_id
+        for item in brand.reference.candidate_matches
+        if item.matches
+    ] == [
+        product.product_id for product in earphones if product.brand == "小米"
+    ]
 
     switch = await parser.parse("再看看手机", context)
-    assert any(
-        operation.slot == "sub_category"
-        and operation.operation == "replace"
-        and operation.value == "智能手机"
-        for operation in switch.slot_operations
+    assert switch.category_reference is not None
+    switch_resolution = resolve_category_reference(
+        switch.category_reference,
+        catalog,
     )
-    switch_result = merge_turn_query(switch, state, catalog)
+    assert switch_resolution.outcome == "resolved"
+    assert switch_resolution.scope is not None
+    assert switch_resolution.scope.sub_category == "智能手机"
+    switch_result = merge_turn_query(
+        switch,
+        state,
+        catalog,
+        resolved_category_scope=switch_resolution.scope,
+    )
     assert switch_result.intent == "switch_category"
     assert switch_result.needs_clarification is False
     assert switch_result.snapshot == QuerySnapshot(
         category="数码电子",
         sub_category="智能手机",
     )
-
 
 async def _chat(client: httpx.AsyncClient, message: str) -> list[ParsedSseEvent]:
     response = await client.post("/api/v1/chat/stream", json={"message": message})

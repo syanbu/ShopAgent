@@ -16,7 +16,7 @@ from shop_agent.models.conversation import (
 from shop_agent.models.events import ProductEventData, TextDeltaData
 from shop_agent.models.query import NumericConstraint, SearchConstraints
 from shop_agent.models.retrieval import EvidenceChunk, RetrievedChunk, SelectedProduct
-from shop_agent.models.state import ShoppingState
+from shop_agent.models.state import NoResultReason, ShoppingState
 from shop_agent.models.turn_query import (
     ProductQuestion,
     ProductReference,
@@ -32,7 +32,9 @@ from shop_agent.services.multi_turn_query_compiler import (
 from shop_agent.services.ports import TurnContext, TurnQueryParser
 from shop_agent.services.query_compiler import compile_effective_query
 from shop_agent.services.reference_resolver import (
+    CategoryResolution,
     ReferenceResolution,
+    resolve_category_reference as resolve_category_reference_service,
     resolve_reference as resolve_reference_service,
 )
 from shop_agent.workflow.dependencies import WorkflowDependencies
@@ -47,9 +49,11 @@ _UNICODE_LINE_SEPARATOR_ESCAPES = {
 CompilationRoute = Literal["compiled", "needs_clarification"]
 RetrievalRoute = Literal["has_results", "no_results"]
 ValidationRoute = Literal["has_candidates", "no_candidates"]
+SelectionRoute = Literal["has_products", "no_products"]
 PendingActionRoute = Literal["resume_pending_action", "resolve_reference"]
 ResumedActionRoute = Literal["resolve_reference", "end"]
 ReferenceResolutionRoute = Literal["resolved", "needs_clarification"]
+CategoryResolutionRoute = Literal["resolved", "needs_clarification"]
 TurnRoute = Literal[
     "search",
     "product_question",
@@ -61,6 +65,16 @@ SAFETY_RULES = (
     "不得声称库存、优惠、优惠券或购买链接；不得补充已校验事实之外的功能、"
     "属性、价格、SKU 或其他事实。"
 )
+NO_RESULT_MESSAGES: dict[NoResultReason, str] = {
+    "exhausted": "当前条件下没有更多符合要求的商品了。",
+    "no_matches": (
+        "当前筛选条件下没有找到匹配商品，建议您放宽或修改筛选条件。"
+    ),
+    "insufficient_evidence": (
+        "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
+        "建议您调整筛选条件。"
+    ),
+}
 
 
 def _single_line_json(value: object) -> str:
@@ -150,6 +164,11 @@ class WorkflowNodes:
                     if turn.reference is not None
                     else None,
                     "candidate_count": len(summaries),
+                    "category_candidate_count": len(
+                        turn.category_reference.candidates
+                    )
+                    if turn.category_reference is not None
+                    else 0,
                     "semantic_operation_count": len(turn.semantic_term_operations),
                     "slot_operation_count": len(turn.slot_operations),
                     "product_question_kind": turn.product_question.kind
@@ -246,6 +265,15 @@ class WorkflowNodes:
             return {
                 "conversation_state": cleared,
                 "turn_query": restored,
+                **(
+                    {
+                        "allowed_category_scopes": (
+                            pending.candidate_category_scopes
+                        )
+                    }
+                    if pending.kind == "ambiguous_category"
+                    else {}
+                ),
             }
 
         return {"turn_query": turn}
@@ -276,10 +304,21 @@ class WorkflowNodes:
             )
             return updates
 
+        loaded_pending = _loaded_pending(state)
+        allowed_product_ids = (
+            loaded_pending.candidate_product_ids
+            if loaded_pending is not None
+            and loaded_pending.kind == "ambiguous_reference"
+            else None
+        )
         resolution = resolve_reference_service(
             reference,
             conversation,
             self.dependencies.catalog,
+            expected_target_type=(
+                "product" if turn.intent == "product_question" else None
+            ),
+            allowed_product_ids=allowed_product_ids,
         )
         if not resolution.needs_clarification:
             updates = {}
@@ -296,7 +335,7 @@ class WorkflowNodes:
             )
             return updates
 
-        previous_pending = _loaded_pending(state)
+        previous_pending = loaded_pending
         if previous_pending is not None:
             clarification_message = (
                 "还是无法确认您指的是哪款商品，请重新完整描述您的需求。"
@@ -337,6 +376,61 @@ class WorkflowNodes:
         )
         return updates
 
+    async def resolve_category_reference(
+        self,
+        state: ShoppingState,
+    ) -> dict[str, object]:
+        self._require_multi_turn_dependencies()
+        turn = state["turn_query"]
+        reference = turn.category_reference
+        if reference is None:
+            return {}
+
+        allowed_scopes = state.get("allowed_category_scopes")
+        resolution = resolve_category_reference_service(
+            reference,
+            self.dependencies.catalog,
+            allowed_scopes=allowed_scopes,
+        )
+        if resolution.outcome == "resolved":
+            if resolution.scope is None:
+                raise RuntimeError("resolved category is missing its scope")
+            _log_category_resolution(state, resolution)
+            return {"resolved_category_scope": resolution.scope}
+
+        conversation = state["conversation_state"]
+        if allowed_scopes is not None:
+            message = "仍无法确认商品类型，请重新完整描述您的需求。"
+            updated_conversation = conversation.model_copy(
+                update={"pending_clarification": None},
+                deep=True,
+            )
+        elif resolution.outcome == "ambiguous":
+            message = resolution.message or "请进一步说明商品类型。"
+            pending = PendingClarification(
+                kind="ambiguous_category",
+                candidate_category_scopes=tuple(
+                    candidate.model_copy(deep=True)
+                    for candidate in resolution.candidate_scopes
+                ),
+                suspended_turn_query=turn.model_copy(deep=True),
+                attempt_count=1,
+            )
+            updated_conversation = conversation.model_copy(
+                update={"pending_clarification": pending},
+                deep=True,
+            )
+        else:
+            message = resolution.message or "当前商品目录暂不支持该商品类型。"
+            updated_conversation = conversation.model_copy(deep=True)
+
+        _log_category_resolution(state, resolution)
+        return {
+            "conversation_state": updated_conversation,
+            "clarification_message": message,
+            "response_mode": "clarification",
+        }
+
     async def persist_clarification(
         self,
         state: ShoppingState,
@@ -376,6 +470,7 @@ class WorkflowNodes:
             self.dependencies.catalog,
             resolved_product_id=state.get("resolved_product_id"),
             resolved_brand=state.get("resolved_brand"),
+            resolved_category_scope=state.get("resolved_category_scope"),
         )
         _log_query_snapshot_compiled(
             state,
@@ -427,7 +522,12 @@ class WorkflowNodes:
         )
         updates: dict[str, object] = {"retrieved_chunks": chunks}
         if not chunks:
-            updates["response_mode"] = "no_results"
+            updates.update(
+                {
+                    "response_mode": "no_results",
+                    "no_result_reason": _no_result_reason(state, "no_matches"),
+                }
+            )
         return updates
 
     async def aggregate_products(self, state: ShoppingState) -> dict[str, object]:
@@ -455,7 +555,15 @@ class WorkflowNodes:
         )
         updates: dict[str, object] = {"validated_candidates": validated}
         if not any(candidate.eligible for candidate in validated):
-            updates["response_mode"] = "no_results"
+            updates.update(
+                {
+                    "response_mode": "no_results",
+                    "no_result_reason": _no_result_reason(
+                        state,
+                        "insufficient_evidence",
+                    ),
+                }
+            )
         return updates
 
     async def decide_candidates(self, state: ShoppingState) -> dict[str, object]:
@@ -464,7 +572,21 @@ class WorkflowNodes:
             self.dependencies.settings.final_product_limit,
             constraints=state["effective_constraints"],
         )
-        return {"selected_products": selected, "response_mode": "shopping"}
+        updates: dict[str, object] = {
+            "selected_products": selected,
+            "response_mode": "shopping",
+        }
+        if not selected:
+            updates.update(
+                {
+                    "response_mode": "no_results",
+                    "no_result_reason": _no_result_reason(
+                        state,
+                        "insufficient_evidence",
+                    ),
+                }
+            )
+        return updates
 
     async def emit_product_events(
         self,
@@ -523,16 +645,25 @@ class WorkflowNodes:
     async def persist_no_results(self, state: ShoppingState) -> dict[str, object]:
         _, repository = self._require_multi_turn_dependencies()
         conversation = state["conversation_state"]
+        preserve_latest_batch = state["search_intent"] == "more_results"
         seen_ids = (
             list(conversation.seen_product_ids)
-            if state["search_intent"] == "more_results"
+            if preserve_latest_batch
             else []
         )
         updated = conversation.model_copy(
             update={
                 "query_snapshot": state["query_snapshot"].model_copy(deep=True),
-                "recent_candidates": [],
-                "focused_product_id": None,
+                "recent_candidates": (
+                    list(conversation.recent_candidates)
+                    if preserve_latest_batch
+                    else []
+                ),
+                "focused_product_id": (
+                    conversation.focused_product_id
+                    if preserve_latest_batch
+                    else None
+                ),
                 "seen_product_ids": seen_ids,
                 "pending_clarification": None,
             },
@@ -667,6 +798,23 @@ class WorkflowNodes:
         writer({"event": "text_delta", "data": data.model_dump(mode="json")})
         return {"response_text": message}
 
+    async def emit_no_results_response(
+        self,
+        state: ShoppingState,
+        writer: StreamWriter,
+    ) -> dict[str, object]:
+        reason = state.get("no_result_reason")
+        if reason is None:
+            raise RuntimeError("no-result response requires a reason")
+        message = NO_RESULT_MESSAGES[reason]
+        writer(
+            {
+                "event": "text_delta",
+                "data": TextDeltaData(delta=message).model_dump(mode="json"),
+            }
+        )
+        return {"response_text": message}
+
     async def generate_response(
         self, state: ShoppingState, writer: StreamWriter
     ) -> dict[str, str]:
@@ -733,6 +881,17 @@ def build_nodes(dependencies: WorkflowDependencies) -> WorkflowNodes:
     return WorkflowNodes(dependencies)
 
 
+def _no_result_reason(
+    state: ShoppingState,
+    ordinary_reason: Literal["no_matches", "insufficient_evidence"],
+) -> NoResultReason:
+    return (
+        "exhausted"
+        if state["search_intent"] == "more_results"
+        else ordinary_reason
+    )
+
+
 def route_compilation(state: ShoppingState) -> CompilationRoute:
     return (
         "needs_clarification"
@@ -753,6 +912,10 @@ def route_validation(state: ShoppingState) -> ValidationRoute:
     )
 
 
+def route_selection(state: ShoppingState) -> SelectionRoute:
+    return "has_products" if state["selected_products"] else "no_products"
+
+
 def route_pending_action(state: ShoppingState) -> PendingActionRoute:
     conversation = state["conversation_state"]
     return (
@@ -767,6 +930,14 @@ def route_resumed_action(state: ShoppingState) -> ResumedActionRoute:
 
 
 def route_reference_resolution(state: ShoppingState) -> ReferenceResolutionRoute:
+    return (
+        "needs_clarification"
+        if state.get("response_mode") == "clarification"
+        else "resolved"
+    )
+
+
+def route_category_resolution(state: ShoppingState) -> CategoryResolutionRoute:
     return (
         "needs_clarification"
         if state.get("response_mode") == "clarification"
@@ -831,6 +1002,12 @@ def _merge_pending_turn(
             ).model_dump()
         )
 
+    if (
+        pending.kind == "ambiguous_category"
+        and answer.category_reference is None
+    ):
+        return None
+
     if pending.kind == "missing_context" and not _has_explicit_query_progress(answer):
         return None
 
@@ -871,6 +1048,13 @@ def _merge_pending_turn(
         else (
             suspended.reference.model_copy(deep=True)
             if suspended.reference is not None
+            else None
+        ),
+        "category_reference": answer.category_reference.model_copy(deep=True)
+        if answer.category_reference is not None
+        else (
+            suspended.category_reference.model_copy(deep=True)
+            if suspended.category_reference is not None
             else None
         ),
         "product_question": answer.product_question.model_copy(deep=True)
@@ -988,7 +1172,34 @@ def _numeric_operation_identity(operation: SlotOperation) -> str | None:
 
 
 def _has_explicit_query_progress(answer: TurnQuery) -> bool:
-    return bool(answer.slot_operations or answer.semantic_term_operations)
+    return bool(
+        answer.category_reference
+        or answer.slot_operations
+        or answer.semantic_term_operations
+    )
+
+
+def _log_category_resolution(
+    state: ShoppingState,
+    resolution: CategoryResolution,
+) -> None:
+    logger.info(
+        "category_resolution %s",
+        _single_line_json(
+            {
+                "request_id": state.get("request_id"),
+                "conversation_id": state.get("conversation_id"),
+                "outcome": resolution.outcome,
+                "candidate_count": len(resolution.candidate_scopes),
+                "resolved_category": resolution.scope.category
+                if resolution.scope is not None
+                else None,
+                "resolved_sub_category": resolution.scope.sub_category
+                if resolution.scope is not None
+                else None,
+            }
+        ),
+    )
 
 
 def _humanize_reference_message(message: str) -> str:
@@ -1314,17 +1525,7 @@ def build_verified_response_prompt(
 
     selected = state.get("selected_products", [])
     if not selected:
-        reason = (
-            "没有召回到商品"
-            if not state.get("retrieved_chunks")
-            else "没有通过证据校验的商品"
-        )
-        return (
-            "你是文本导购助手。请告知用户当前没有可靠的匹配结果，建议放宽或修改条件。"
-            f"原因：{reason}。不要推荐未提供的商品。\n"
-            f"{SAFETY_RULES}\n"
-            f"用户原话：{user_message}"
-        )
+        raise RuntimeError("shopping response requires selected products")
 
     facts = [
         _selected_product_facts(state, selected_product, dependencies)

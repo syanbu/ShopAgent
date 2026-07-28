@@ -56,6 +56,14 @@ def _chat_response(content: str) -> SimpleNamespace:
     )
 
 
+def _candidate_matches(*matched_product_ids: str) -> list[dict[str, object]]:
+    matched = set(matched_product_ids)
+    return [
+        {"product_id": f"p{index}", "matches": f"p{index}" in matched}
+        for index in range(1, 4)
+    ]
+
+
 def _turn_response(
     *,
     question_kind: str = "semantic",
@@ -71,6 +79,7 @@ def _turn_response(
                     "surface_text": "第二个",
                     "kind": "ordinal",
                     "ordinal": 2,
+                    "candidate_matches": _candidate_matches("p2"),
                 },
                 "product_question": {
                     "text": "第二个防水吗",
@@ -157,6 +166,50 @@ def _turn_parser(
         )
 
 
+def _category_turn_parser(
+    settings: Settings,
+    client: SimpleNamespace,
+) -> DashScopeTurnQueryParser:
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        return DashScopeTurnQueryParser(
+            settings,
+            categories=["数码电子", "服饰运动"],
+            sub_categories=[
+                "智能手机",
+                "真无线耳机",
+                "徒步鞋",
+                "篮球鞋",
+                "跑步鞋",
+            ],
+            category_pairs=[
+                ("数码电子", "智能手机"),
+                ("数码电子", "真无线耳机"),
+                ("服饰运动", "徒步鞋"),
+                ("服饰运动", "篮球鞋"),
+                ("服饰运动", "跑步鞋"),
+            ],
+        )
+
+
+def _category_turn_response(
+    surface_text: str,
+    candidates: list[dict[str, str | None]],
+) -> SimpleNamespace:
+    return _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "category_reference": {
+                    "surface_text": surface_text,
+                    "candidates": candidates,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def test_turn_context_has_independent_candidate_defaults() -> None:
     first = TurnContext()
     second = TurnContext()
@@ -222,7 +275,112 @@ def test_turn_query_prompt_contains_schema_taxonomy_and_complete_contract() -> N
     assert "指示" in prompt
     assert "当前 message 中的连续原文片段" in prompt
     assert "没有显式引用时 reference 必须为 null" in prompt
+    assert "candidate_matches" in prompt
+    assert "每个候选 product_id 恰好一次" in prompt
+    assert "不能为了避免澄清只选择一个" in prompt
     assert "不得遗漏" in prompt
+    assert "category_reference" in prompt
+    assert "简称、别名或上位词" in prompt
+    assert "所有合理的精确 Catalog" in prompt
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_accepts_grounded_exact_category_candidates(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(
+        return_value=_category_turn_response(
+            "耳机",
+            [{"category": "数码电子", "sub_category": "真无线耳机"}],
+        )
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _category_turn_parser(settings, client).parse(
+        "推荐耳机",
+        TurnContext(),
+    )
+
+    assert result.category_reference is not None
+    assert result.category_reference.surface_text == "耳机"
+    assert [
+        (candidate.category, candidate.sub_category)
+        for candidate in result.category_reference.candidates
+    ] == [("数码电子", "真无线耳机")]
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_accepts_empty_candidates_for_unsupported_type(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(
+        return_value=_category_turn_response("相机", [])
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _category_turn_parser(settings, client).parse(
+        "推荐相机",
+        TurnContext(),
+    )
+
+    assert result.category_reference is not None
+    assert result.category_reference.candidates == []
+
+
+@pytest.mark.parametrize(
+    ("message", "surface_text", "candidates"),
+    [
+        (
+            "推荐耳机",
+            "手机",
+            [{"category": "数码电子", "sub_category": "真无线耳机"}],
+        ),
+        (
+            "推荐耳机",
+            "耳机",
+            [{"category": "不存在类目", "sub_category": None}],
+        ),
+        (
+            "推荐耳机",
+            "耳机",
+            [{"category": "服饰运动", "sub_category": "真无线耳机"}],
+        ),
+        (
+            "推荐鞋",
+            "鞋",
+            [
+                {"category": "服饰运动", "sub_category": "跑步鞋"},
+                {"category": "服饰运动", "sub_category": "徒步鞋"},
+            ],
+        ),
+    ],
+    ids=["ungrounded", "unknown-category", "invalid-pair", "out-of-order"],
+)
+@pytest.mark.asyncio
+async def test_turn_query_parser_rejects_invalid_category_references_after_retry(
+    settings: Settings,
+    message: str,
+    surface_text: str,
+    candidates: list[dict[str, str | None]],
+) -> None:
+    invalid = _category_turn_response(surface_text, candidates)
+    create = AsyncMock(side_effect=[invalid, invalid])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        await _category_turn_parser(settings, client).parse(
+            message,
+            TurnContext(),
+        )
+
+    assert caught.value.code == "TURN_QUERY_PARSE_FAILED"
+    assert create.await_count == 2
 
 
 def test_turn_query_prompt_escapes_unicode_separators_and_marks_embedded_data() -> None:
@@ -343,6 +501,123 @@ async def test_turn_query_parser_maps_structured_price_question(
     assert result.product_question is not None
     assert result.product_question.kind == "structured"
     assert result.product_question.field == "display_price"
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_corrects_incomplete_candidate_matches(
+    settings: Settings,
+) -> None:
+    incomplete = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "中间那个",
+                    "kind": "ordinal",
+                    "ordinal": 2,
+                    "candidate_matches": [
+                        {"product_id": "p2", "matches": True}
+                    ],
+                },
+                "product_question": {
+                    "text": "中间那个怎么样",
+                    "kind": "semantic",
+                    "field": None,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    complete = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "中间那个",
+                    "kind": "ordinal",
+                    "ordinal": 2,
+                    "candidate_matches": _candidate_matches("p2"),
+                },
+                "product_question": {
+                    "text": "中间那个怎么样",
+                    "kind": "semantic",
+                    "field": None,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(side_effect=[incomplete, complete])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _turn_parser(settings, client).parse(
+        "中间那个怎么样",
+        _turn_context(),
+    )
+
+    assert result.reference is not None
+    assert [item.product_id for item in result.reference.candidate_matches] == [
+        "p1",
+        "p2",
+        "p3",
+    ]
+    assert [
+        item.product_id
+        for item in result.reference.candidate_matches
+        if item.matches
+    ] == ["p2"]
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_rejects_twice_reordered_candidate_matches(
+    settings: Settings,
+) -> None:
+    invalid = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "product_question",
+                "reference": {
+                    "target_type": "product",
+                    "surface_text": "第二个",
+                    "kind": "ordinal",
+                    "ordinal": 2,
+                    "candidate_matches": [
+                        {"product_id": "p2", "matches": True},
+                        {"product_id": "p1", "matches": False},
+                        {"product_id": "p3", "matches": False},
+                    ],
+                },
+                "product_question": {
+                    "text": "第二个怎么样",
+                    "kind": "semantic",
+                    "field": None,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(side_effect=[invalid, invalid])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(ServiceError) as raised:
+        await _turn_parser(settings, client).parse(
+            "第二个怎么样",
+            _turn_context(),
+        )
+
+    assert raised.value.code == "TURN_QUERY_PARSE_FAILED"
+    assert raised.value.retryable is True
+    assert create.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -571,6 +846,7 @@ async def test_turn_query_parser_corrects_invalid_reference_brand(
                         "surface_text": "那个苹果的",
                         "kind": "brand",
                         "brand": brand,
+                        "candidate_matches": _candidate_matches("p2"),
                     },
                     "product_question": {
                         "text": "那个苹果的怎么样",
@@ -613,6 +889,7 @@ async def test_turn_query_parser_normalizes_twice_invalid_reference_brand(
                     "surface_text": "那个苹果的",
                     "kind": "brand",
                     "brand": "不存在品牌",
+                    "candidate_matches": _candidate_matches("p2"),
                 },
                 "product_question": {
                     "text": "那个苹果的怎么样",
@@ -653,6 +930,11 @@ async def test_turn_query_parser_keeps_demonstrative_as_unresolved_clue(
                     "target_type": "product",
                     "surface_text": "那个",
                     "kind": "demonstrative",
+                    "candidate_matches": _candidate_matches(
+                        "p1",
+                        "p2",
+                        "p3",
+                    ),
                 },
                 "product_question": {
                     "text": "那个怎么样",

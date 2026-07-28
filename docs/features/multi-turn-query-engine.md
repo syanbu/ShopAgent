@@ -2,7 +2,7 @@
 
 > 状态：开发中
 >
-> 代码入口：`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/services/ports.py`、`src/shop_agent/services/conversation_repository.py`、`src/shop_agent/services/reference_resolver.py`、`src/shop_agent/services/multi_turn_query_compiler.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/retrieval.py`、`src/shop_agent/services/qdrant_store.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py`、`src/shop_agent/api/dependencies.py`、`tests/unit/test_multi_turn_workflow.py`、`tests/integration/test_chat_api.py`
+> 代码入口：`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/services/ports.py`、`src/shop_agent/services/conversation_repository.py`、`src/shop_agent/services/reference_resolver.py`、`src/shop_agent/services/multi_turn_query_compiler.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/retrieval.py`、`src/shop_agent/services/qdrant_store.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py`、`src/shop_agent/api/dependencies.py`、`tests/unit/test_model_gateways.py`、`tests/unit/test_reference_resolver.py`、`tests/unit/test_multi_turn_workflow.py`、`tests/integration/test_chat_api.py`
 
 ## 功能目标
 
@@ -10,8 +10,10 @@
 表达编译为一份可独立执行的查询快照，支持继承、替换、删除和清空品类、预算、场景、
 品牌偏好、SKU 条件、必需特征与避雷项。
 
-系统只在最近一轮展示的商品中解析“第二个”“那个小米的”“它”等指代。无法唯一
-确定对象时不猜测，而是保存被暂停的操作并追问用户；用户明确目标后继续原操作。
+系统只在最近一轮展示的商品中解析“第二个”“中间那个”“三星这个”“那个小米的”
+“它”等指代。模型对自然语言与候选标题、品牌的关系做逐项判断，代码校验候选集合并
+根据命中数量确定唯一对象或歧义。无法唯一确定对象时不猜测，而是保存被暂停的操作并
+追问用户；用户明确目标后继续原操作。
 商品问答解析出 `product_id` 后，从内存 `ProductCatalog` 读取结构化事实，必要时仅从
 Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 
@@ -22,6 +24,7 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 - SQLite 会话状态和可替换的 `ConversationRepository`。
 - 本轮增量 `TurnQuery`、完整 `QuerySnapshot` 和确定性槽位操作。
 - 最近一轮商品候选、焦点商品与序数、指示、品牌、商品名称指代。
+- 用户自然语言商品类型到 Catalog 规范品类的唯一绑定与歧义澄清。
 - 指代歧义、条件冲突和缺少上下文时的可续接澄清。
 - 新搜索、条件细化、品类切换、换一批、商品追问、澄清回答和非购物路由。
 - “再便宜一点”“贵一点”等相对价格操作。
@@ -67,8 +70,14 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 
 指代候选域只包含最近一轮展示的商品：
 
-- 明确序数按最近结果的 `rank` 解析；越界时追问。
-- 商品名或品牌只在最近结果中匹配；唯一命中才成功。
+- 显式指代由模型对每个最近候选输出一次 `product_id + matches`；解析器要求 ID 按
+  `rank` 顺序完整覆盖最近候选，不能缺失、重复、重排或生成域外 ID。
+- 序数、相对位置、标题和品牌措辞都使用该候选匹配矩阵。代码只接受唯一商品命中；
+  多个商品命中时只用实际命中的子集追问，例如两款小米会追问“第一款还是第二款”，
+  不会把无关的第三款放入澄清。
+- 品牌条件本身可以从多个同品牌候选归并为一个 Catalog 品牌；但 `product_question`
+  必须最终得到唯一 `product_id`，不能因为模型把“三星”标成品牌目标而进入商品知识
+  失败。
 - 裸指代词优先指向已明确的焦点商品。
 - 没有焦点但最近只展示一个商品时，裸指代指向该商品。
 - 没有焦点且最近展示多个商品时，裸指代触发澄清。
@@ -77,10 +86,14 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 - `ProductReference.surface_text` 必须逐字来自当前用户消息中的连续原文片段。模型不能
   把最近候选标题、品牌或焦点商品转写成本轮显式引用；缺少原文依据的引用按非法结构化
   输出纠正一次，避免它绕过已有焦点。
-- 模型只能提取指代线索，可信 `product_id` 必须由代码根据 Catalog 和会话状态生成。
+- 模型输出的候选 ID 只是从 `recent_candidates` 复制的非可信逐项判断，不是最终绑定；
+  可信 `product_id` 仍由代码在校验后的候选域中按基数规则生成。
+- 当前候选摘要只包含 `rank`、`product_id`、标题和品牌，因此支持序数、相对位置、标题
+  与品牌语义；不支持“最便宜的”“续航最好的”等需要候选价格或 feature 的比较级指代。
 
 用户明确选择某个候选后，该商品成为焦点。连续追问中的“它”可以指向该焦点。新
-搜索、品类切换和换一批会清空旧焦点。
+搜索、品类切换和成功返回新商品的换一批会清空旧焦点；纯 `more_results` 没有可展示
+商品时不构成新的结果批次，保留上一批候选与焦点供后续追问。
 
 ### 澄清与恢复
 
@@ -93,6 +106,11 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 pending、取消暂停操作并要求用户重新完整描述，避免澄清死循环。这保持“连续两次无法
 解析即退出”的规则，不会保存一个等待第 3 次回答的状态。
 
+歧义 pending 只保存本次真实命中的 `candidate_product_ids`。澄清回答即使输出了完整
+最近候选矩阵，也必须与该不可变子集求交，不能借“第三个”等回答跳出上一轮“第一款
+还是第二款”的选择范围。旧版已持久化且没有候选匹配矩阵的引用继续走原线索解析兼容
+路径。
+
 `missing_context` 同时覆盖“尚无查询快照”和“已有快照但缺少最近展示价格基准”。
 澄清答案恢复时，只有前者将暂停操作转为 `new_search`；后者保留暂停的搜索意图，在
 已有快照上合并明确预算，避免丢失品类与未修改条件。
@@ -102,6 +120,27 @@ pending、取消暂停操作并要求用户重新完整描述，避免澄清死�
 用户明确提出与当前不同的商品子品类时，代码将本轮视为品类切换并清空旧预算、品牌、
 SKU、场景、必需特征、排除条件、最近候选、焦点和已展示集合。只有用户在新请求中
 重新表达的条件才进入新快照；“还是这个预算”等显式继承表达由本轮槽位操作重新写入。
+
+### 自然语言品类解析
+
+用户不必逐字说出 Catalog 的规范分类名称。`TurnQuery.category_reference` 保存当前
+消息中的商品类型原文，以及 LLM 判断的所有规范 Catalog 候选。例如“耳机”唯一对应
+`数码电子 / 真无线耳机` 时，代码将该范围写入查询快照；“鞋”同时对应跑步鞋、篮球鞋
+和徒步鞋时，代码保存候选与原查询操作并固定追问，不能让模型静默选择一种。
+
+模型负责自然语言与 taxonomy 的语义关系，输出候选必须使用 Catalog 精确值。解析器
+验证原文片段、Catalog 成员、组合、去重和稳定顺序；resolver 只按候选基数确定控制流：
+
+- 一个候选生成可信 `category/sub_category`；
+- 多个候选保存 `ambiguous_category` pending，回答只能在不可变候选集合内选择；
+- 明确商品类型但候选为空时固定提示目录不支持，并跳过全库检索；
+- 没有明确商品类型时 `category_reference=null`，继续允许“推荐适合送人的礼物”等
+  categoryless 全库语义搜索。
+
+品类澄清保留同轮预算、品牌、功能、SKU 和语义操作。例如“500元以内的鞋”回答
+“跑步鞋”后得到 `服饰运动 / 跑步鞋 + max_price=500`。部署前已经错误保存为
+categoryless 的旧快照不自动迁移，因为仅凭 `semantic_terms` 无法可靠区分遗漏品类与
+合法全库查询；用户需要重新发起明确搜索或使用新的 `conversation_id`。
 
 ### 条件细化与换一批
 
@@ -116,6 +155,22 @@ SKU、场景、必需特征、排除条件、最近候选、焦点和已展示�
 还包含语义词、槽位/价格、相对价格或解析出的品牌变化，则确定性转为
 `refine_search`（品类变化仍优先成为 `switch_category`），应用操作、清空旧 seen，
 并从全库重新检索，不能静默丢弃已经抽取的条件。
+
+### 无结果与结果耗尽
+
+无结果响应由后端根据工作流事实选择固定文案，不调用回答模型：
+
+- 纯 `more_results` 没有新商品时返回“当前条件下没有更多符合要求的商品了。”
+- 新搜索、条件细化或品类切换零召回时返回“当前筛选条件下没有找到匹配商品，建议您
+  放宽或修改筛选条件。”
+- 有召回但证据校验或最终 SKU 选择没有可展示商品时返回“找到了一些候选商品，但现有
+  信息不足以确认它们符合要求，建议您调整筛选条件。”
+
+内部 `no_result_reason` 只存在于单次 `ShoppingState`，不进入 SQLite 或 SSE 数据。
+所有无结果分支先执行 `persist_no_results`，保存成功后才发送一个固定
+`text_delta`。失败的纯 `more_results` 保留 `seen_product_ids`、`recent_candidates`
+和 `focused_product_id`；因为本轮没有展示新商品，上一批仍是最近可指代的商品批次。
+新搜索、条件细化和品类切换无结果时继续清空这些旧展示状态。
 
 ### 相对价格
 
@@ -150,6 +205,7 @@ SKU、场景、必需特征、排除条件、最近候选、焦点和已展示�
   "schema_version": 1,
   "intent": "refine_search",
   "reference": null,
+  "category_reference": null,
   "semantic_term_operations": [],
   "slot_operations": [
     {
@@ -161,6 +217,24 @@ SKU、场景、必需特征、排除条件、最近候选、焦点和已展示�
   "product_question": null
 }
 ```
+
+明确商品类型使用独立结构：
+
+```json
+{
+  "surface_text": "耳机",
+  "candidates": [
+    {
+      "category": "数码电子",
+      "sub_category": "真无线耳机"
+    }
+  ]
+}
+```
+
+`surface_text` 必须来自当前消息连续原文。候选允许 `sub_category=null` 表示用户明确
+指向整个顶级类目；普通上位词不能借此扩大为包含无关商品的顶级类目。
+`category_reference` 与本轮直接 `category/sub_category` 槽位操作不能并存。
 
 第一版意图为：
 
@@ -210,12 +284,22 @@ SlotOperation
   "kind": "ordinal",
   "ordinal": 2,
   "brand": null,
-  "product_name": null
+  "product_name": null,
+  "candidate_matches": [
+    {"product_id": "p1", "matches": false},
+    {"product_id": "p2", "matches": true},
+    {"product_id": "p3", "matches": false}
+  ]
 }
 ```
 
 `target_type` 区分商品与品牌对象；`kind` 覆盖序数、指示、品牌和商品名称线索。
-模型输出不包含可信 `resolved_product_id`。
+`ReferenceCandidateMatch` 的 `product_id` 必须逐字复制当前 `recent_candidates`；
+`candidate_matches` 必须按候选 rank 顺序完整覆盖每个 ID 恰好一次。模型输出不包含
+可信 `resolved_product_id`，解析器负责矩阵结构校验，resolver 负责候选域限制和唯一性
+判断。字段默认空列表主要用于兼容升级前已持久化的 pending 和非模型测试替身；当
+当前候选域本身为空时，空列表也是完整的空域判断。新模型在非空候选域输出引用时必须
+通过完整矩阵校验。
 
 商品追问使用独立结构，模型将问题分为允许直接读取的结构化字段（名称、品牌、类目、
 展示价格和 SKU）或开放语义问题，并保留用户问题文本。代码只对允许的结构化字段直接
@@ -282,9 +366,10 @@ ConversationRecord
 SKU 和文本证据不写入 SQLite。SQL 乐观并发版本只属于 `ConversationRecord`，不进入
 序列化的 `ConversationState.state_json`。
 
-`PendingClarification` 实际保存 `kind`、不可变的 `candidate_product_ids`、被暂停的
-`suspended_turn_query` 与 `attempt_count`。初次未解析写入 1；下一次仍未解析立即退出，
-不保存等待第三次回答的状态。
+`PendingClarification` 实际保存 `kind`、不可变的 `candidate_product_ids`、
+不可变的 `candidate_category_scopes`、被暂停的 `suspended_turn_query` 与
+`attempt_count`。商品歧义使用商品 ID，品类歧义使用规范品类范围。初次未解析写入 1；
+下一次仍未解析立即退出，不保存等待第三次回答的状态。
 
 ### SQLite
 
@@ -328,13 +413,15 @@ START
   -> pending? -> resume_pending_action -> resolve_reference / END
   -> resolve_reference
        -> persist_clarification（保存后直接发澄清文本）-> END
-       -> route_turn
+       -> resolve_category_reference
+            -> persist_clarification（歧义或目录不支持）-> END
+            -> route_turn
             -> search
                  -> merge_query_snapshot -> compile_effective_query
                  -> retrieve_chunks -> aggregate_products -> semantic_rerank
                  -> validate_evidence -> decide_candidates
                  -> persist_search_result -> emit_product_events -> generate_response
-                 -> persist_no_results -> generate_response
+                 -> persist_no_results -> emit_no_results_response -> END
             -> product_question
                  -> load_product_facts
                  -> fetch_product_knowledge（仅 semantic）
@@ -376,9 +463,19 @@ TurnQuery 的 taxonomy 后校验同时覆盖槽位品牌和
 越界时沿用一次 structured correction；第二次仍越界时安全归一化为可重试的
 `TURN_QUERY_PARSE_FAILED`，不向客户端泄露模型原始内容。
 
+候选匹配矩阵同样进入一次 structured correction：缺项、重复、重排或域外 ID 都视为
+非法结构化输出；纠正后仍不完整则返回 `TURN_QUERY_PARSE_FAILED`。完整矩阵中的
+`matches` 是语言理解结果，后端不重新做字符串等值匹配，但会确定性执行目标类型覆盖、
+命中基数判断、Catalog 品牌归并和 pending 候选子集求交。
+
+品类候选进入相同的结构化纠错边界：原文不属于当前消息、候选不在 Catalog、组合非法、
+重复、顺序错误或与直接品类槽位冲突时纠正一次。品类候选列表的语言完整性由真实模型
+验收约束；“耳机”“手机”“鞋”“T恤”分别重复五次，任何一次遗漏都必须将实现升级为
+完整 taxonomy 匹配矩阵，不能以不完整候选列表上线。
+
 搜索结果由 `persist_search_result` 保存后才发送 `product` 和推荐文本；零结果由
-`persist_no_results` 保存后才发送文本；商品追问由 `persist_focus` 保存焦点和清除
-pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层保持
+`persist_no_results` 保存后才发送固定文本，且不调用回答模型；商品追问由
+`persist_focus` 保存焦点和清除 pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层保持
 `message_start -> product* -> text_delta* -> message_end` 兼容顺序；商品发送前失败为
 `failed`，已发送商品后生成失败为 `partial`，并通过安全 `error` 事件归一化公开错误。
 
@@ -392,10 +489,25 @@ pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层�
 一次结构化模型调用生成 `TurnQuery`。模型处理开放语言，代码负责对象唯一性、槽位
 操作、品类切换、相对价格和路由，避免模型静默丢失或篡改历史条件。
 
+### 模型理解指代语义，代码决定最终绑定
+
+模型逐项判断用户原文是否指向每个最近候选，因而可以理解“中间那个”“三星这个”
+以及标题或品牌的自然语言变体。模型不能直接返回最终 `resolved_product_id`；解析器
+先验证候选矩阵与服务端上下文完全同域、有序且无重复，再由 resolver 按唯一商品、
+唯一品牌或歧义规则产生可信结果。这样保留模型的语言理解能力，同时不把候选范围和
+对象唯一性下放给模型。
+
 ### 最近结果限制指代范围
 
 裸指代和序数不回溯整个会话。`seen_product_ids` 仅用于换一批排重，不能扩大引用域。
 这以较小的记忆范围换取明确、可解释的消解规则。
+
+### 确定性无结果使用固定响应
+
+检索、证据校验和最终 SKU 选择已经能确定为什么没有可展示商品。工作流在失败来源记录
+`no_result_reason`，持久化后直接发送对应固定文案，不再为确定性状态增加模型调用和
+文案漂移。纯 `more_results` 只表示保持原条件继续取数，因此可以安全归类为结果耗尽；
+携带条件修改的同轮输入会先归一化为 `refine_search`。
 
 ### 商品与会话存储分离
 
@@ -433,12 +545,18 @@ pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层�
 | 要求 | 具体证据 |
 |---|---|
 | 最近一批中的序数、指示、品牌和商品名；旧批次不可引用 | `tests/unit/test_reference_resolver.py::test_resolver_uses_the_expected_product_reference_branch`、`test_resolver_matches_a_unique_brand_to_one_product`、`test_resolver_matches_an_exact_casefolded_product_name_only`、`test_resolver_never_resolves_a_product_only_seen_in_an_older_batch` |
+| LLM 候选匹配矩阵完整性、顺序与纠错 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_incomplete_candidate_matches`、`test_turn_query_parser_rejects_twice_reordered_candidate_matches` |
+| 矩阵基数、目标类型覆盖、pending 候选子集与旧状态兼容 | `tests/unit/test_reference_resolver.py::test_matrix_resolves_one_product_without_using_clue_kind`、`test_matrix_product_ambiguity_lists_only_matched_candidates`、`test_expected_product_target_overrides_model_brand_target`、`test_pending_allowed_ids_prevent_escape_to_unmatched_product`、`test_invalid_matrix_coverage_fails_closed_to_clarification`；`tests/unit/test_conversation_models.py::test_legacy_pending_reference_without_candidate_matches_still_loads` |
+| 品牌式商品追问、歧义候选缩小与澄清越界保护 | `tests/unit/test_multi_turn_workflow.py::test_product_question_brand_wording_resolves_unique_matched_product`、`test_candidate_matrix_ambiguity_persists_only_matched_products`、`test_pending_candidate_subset_blocks_clarification_answer_escape`；`tests/integration/test_chat_api.py::test_compiled_http_brand_wording_resolves_matched_product_id` |
 | 焦点和后续代词 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_ordinal_question_sets_focus_and_pronoun_reuses_it`；`tests/integration/test_chat_api.py::test_compiled_http_dialogue_persists_focus_for_follow_up_pronoun` |
 | 歧义保存/恢复、取消、新搜索覆盖、两次退出 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_ambiguous_question_persists_and_answer_resumes_p2`、`test_cancel_clears_pending_persists_and_emits_exact_text`、`test_clear_new_search_discards_pending_without_reviving_suspended_action`、`test_second_unresolved_attempt_clears_pending_and_requests_complete_restatement`、`test_ambiguous_pending_answer_without_reference_exits_attempt_limit` |
 | 品类切换重置 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_category_switch_resets_old_query_and_display_state`；`tests/unit/test_multi_turn_query_compiler.py::test_category_switch_resets_old_state_and_keeps_only_restated_slots` |
 | 标量、列表、SKU、数值和语义操作 | `tests/unit/test_multi_turn_query_compiler.py::test_refinement_replaces_budget_and_preserves_unrelated_slot`、`test_brand_and_feature_slots_support_remove_and_clear`、`test_sku_operations_are_stable_and_copy_on_write`、`test_numeric_operations_are_stable_and_copy_on_write`、`test_semantic_terms_add_and_remove_in_stable_order`；`tests/unit/test_turn_query_models.py::test_semantic_term_add_and_remove_reject_blank_values` |
 | 相对价格基准与明确金额覆盖 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent`、`test_missing_price_baseline_answer_preserves_existing_snapshot_and_retrieves`；`tests/unit/test_multi_turn_query_compiler.py::test_focus_price_is_the_cheaper_baseline`、`test_latest_batch_extreme_is_relative_price_baseline`、`test_explicit_applicable_boundary_overrides_relative_price` |
 | seen 累积、mutation 全库重检索且 ordinal 只看最新批 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_more_batches_accumulate_seen_and_final_ordinal_targets_h`、`test_more_results_with_query_mutation_refines_from_full_catalog`；`tests/unit/test_multi_turn_query_compiler.py::test_more_results_with_price_operation_becomes_refinement`、`test_more_results_with_semantic_operation_becomes_refinement`、`test_more_results_with_relative_price_becomes_refinement` |
+| 无结果原因分类与固定文案 | `tests/unit/test_workflow_routes.py::test_no_hits_skips_rerank_validation_and_decision`、`test_evidence_empty_skips_candidate_decision`；`tests/unit/test_multi_turn_workflow.py::test_failed_more_results_preserves_latest_reference_context`、`test_empty_final_selection_uses_insufficient_evidence_response`、`test_more_results_with_only_ineligible_remaining_products_is_exhausted` |
+| 自然语言品类唯一绑定、歧义恢复、越界保护与目录不支持短路 | `tests/unit/test_model_gateways.py::test_turn_query_parser_accepts_grounded_exact_category_candidates`、`test_turn_query_parser_rejects_invalid_category_references_after_retry`；`tests/unit/test_reference_resolver.py::test_category_resolver_resolves_one_exact_catalog_scope`、`test_category_resolver_clarifies_all_multiple_catalog_scopes`；`tests/unit/test_multi_turn_workflow.py::test_unique_category_reference_retrieves_only_the_resolved_scope`、`test_category_clarification_resumes_suspended_budget`、`test_category_clarification_answer_cannot_escape_pending_scopes`、`test_explicit_unsupported_category_skips_retrieval` |
+| 结果耗尽的 HTTP/SSE 与持久化边界 | `tests/integration/test_chat_api.py::test_compiled_http_more_results_exhaustion_preserves_follow_up_reference`；`tests/unit/test_multi_turn_workflow.py::test_failed_more_results_preserves_latest_reference_context`、`test_no_result_paths_persist_before_text_and_clear_latest_focus` |
 | 无显式商品 reference 的焦点/单候选回退与多候选澄清 | `tests/unit/test_multi_turn_workflow.py::test_reference_less_product_question_uses_focused_product`、`test_reference_less_structured_question_uses_focused_product_skus`、`test_reference_less_product_question_uses_only_recent_candidate`、`test_reference_less_product_question_with_multiple_candidates_clarifies` |
 | 引用必须来自当前消息原文，不能由候选或焦点补写 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_ungrounded_reference_to_none`、`test_turn_query_parser_rejects_twice_ungrounded_reference` |
 | TurnQuery 引用品牌 taxonomy 纠正与安全失败 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_invalid_reference_brand`、`test_turn_query_parser_normalizes_twice_invalid_reference_brand` |
@@ -450,36 +568,35 @@ pending 后才生成文本。保存失败时不发送商品或文本。HTTP 层�
 
 ### Fresh 验证
 
-2026-07-26 最终修复与独立复审完成后，在未设置 `RUN_LIVE_TESTS=1` 时执行：
+2026-07-28 自然语言品类解析接入完成后执行：
 
-```powershell
-uv run pytest -q -p no:cacheprovider
-# 399 passed, 2 skipped in 15.88s
+```bash
+env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q -p no:cacheprovider
+# 458 passed, 21 skipped in 8.13s
 
-uv run pytest -q -p no:cacheprovider -rs
-# 399 passed, 2 skipped in 13.70s
-# tests/integration/test_qdrant_store.py：本地 Qdrant 返回 502 Bad Gateway
-# tests/live/test_live_shopping_flow.py：未设置 RUN_LIVE_TESTS=1
-
-uv run ruff check .
+env -u ALL_PROXY -u all_proxy .venv/bin/ruff check .
 # All checks passed!
 
-uv run mypy src scripts
+env -u ALL_PROXY -u all_proxy .venv/bin/mypy src scripts
 # Success: no issues found in 39 source files
 ```
 
-两个跳过项分别是本地 Qdrant 不可用的显式集成 skip，以及显式 opt-in 的 live 测试。
-该 live 用例已经在任何索引或检索前加入五条真实结构化解析断言。进程环境未设置
-`DASHSCOPE_API_KEY`；本地 `.env` 有非空设置，但未验证其有效性；
-`RUN_LIVE_TESTS` 未设置，且本地 Qdrant readiness 请求返回 `502 Bad Gateway`。因此
-没有设置 `RUN_LIVE_TESTS=1`、没有发起 DashScope live 调用，也没有执行 live 索引与
-检索。功能状态保持“开发中”，没有把两个 skip 或未运行的外部服务验收写成成功。
+21 个跳过项均来自显式 opt-in 的 live 测试：20 个用例由“耳机”“手机”“鞋”“T恤”
+四组输入各重复五次，另一个是完整真实服务流程。随后使用
+`RUN_LIVE_TESTS=1` 单独运行 20 个品类稳定性用例，但第一个 DashScope 调用等待约
+120 秒仍未返回，测试由开发者中断，因此不将真实模型候选完整性记为通过。清除
+`ALL_PROXY/all_proxy` 是为了避免当前开发机的 `socks://` 代理配置影响测试 HTTP
+客户端，不改变被测代码。
 
 ## 变更记录
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
+| 2026-07-28 | 纯换一批耗尽时保留上一批候选与焦点 | 无商品返回的轮次不应覆盖最近展示批次，使用户仍可继续询问上一批商品 |
+| 2026-07-28 | 增加自然语言品类候选、确定性唯一绑定、可续接歧义追问和目录不支持短路 | 避免“耳机”等用户说法只进入语义词而失去 Qdrant 品类硬过滤，导致换一批时混入手机或食品 |
+| 2026-07-28 | 区分结果耗尽、零匹配与候选信息不足，并改为后端固定文案 | 避免“没有更多商品”被误报为筛选失败，同时移除确定性无结果场景的回答模型调用 |
+| 2026-07-28 | 为显式商品指代增加完整候选匹配矩阵、确定性基数判定、商品问题目标覆盖和 pending 候选子集保护 | 让 LLM 理解“三星这个”“中间那个”等自然语言，同时由后端安全地产生唯一 `product_id` 或限定范围追问 |
 | 2026-07-26 | 修复澄清恢复、无显式商品指代、含条件换一批和引用品牌校验边界 | 保留已有查询快照与条件，避免 mutation 静默丢失，并将越界品牌纳入一次纠正与安全失败链路 |
-| 2026-07-26 | 接入生产多轮图、SQLite、定向商品问答并补充六组端到端验收与覆盖矩阵 | 同步 Tasks 1–11 的实际类名、节点、路径、状态与 fresh 验证证据 |
+| 2026-07-26 | 接入生产多轮图、SQLite、定向商品问答并补充六组端到端验收与覆盖矩阵 | 同步 Tasks 1 至 11 的实际类名、节点、路径、状态与 fresh 验证证据 |
 | 2026-07-26 | 同步最终增量操作、商品问题、会话版本术语与精确相对价格规则 | 使批准文档与 Task 1 模型一致，并将 `[399, 459, 529]` 的“更贵”结果按 `max + Decimal("0.01")` 更正为 `529.01` |
 | 2026-07-26 | 创建多轮 Query 编译、最近候选指代、澄清恢复和 SQLite 会话设计 | 将多轮碎片表达编译为确定性查询，并与现有单轮检索和商品事实边界衔接 |

@@ -4,10 +4,19 @@ import pytest
 from pydantic import ValidationError
 
 from shop_agent.catalog import ProductCatalog
-from shop_agent.models import CandidateReference, ConversationState, ProductReference
+from shop_agent.models import (
+    CandidateReference,
+    CategoryCandidate,
+    CategoryReference,
+    ConversationState,
+    ProductReference,
+    ReferenceCandidateMatch,
+)
 from shop_agent.models.product import Product
 from shop_agent.services.reference_resolver import (
+    CategoryResolution,
     ReferenceResolution,
+    resolve_category_reference,
     resolve_reference,
 )
 
@@ -55,6 +64,130 @@ def _three_product_catalog() -> ProductCatalog:
     )
 
 
+def _category_catalog() -> ProductCatalog:
+    base = _three_product_catalog().get("p1")
+    products = [
+        base.model_copy(
+            update={
+                "product_id": "earphone",
+                "title": "测试真无线耳机",
+                "category": "数码电子",
+                "sub_category": "真无线耳机",
+            }
+        ),
+        base.model_copy(
+            update={
+                "product_id": "running",
+                "title": "测试跑步鞋",
+                "category": "服饰运动",
+                "sub_category": "跑步鞋",
+            }
+        ),
+        base.model_copy(
+            update={
+                "product_id": "basketball",
+                "title": "测试篮球鞋",
+                "category": "服饰运动",
+                "sub_category": "篮球鞋",
+            }
+        ),
+    ]
+    return ProductCatalog(
+        Path("."),
+        {product.product_id: product for product in products},
+        {},
+    )
+
+
+def test_category_resolver_resolves_one_exact_catalog_scope() -> None:
+    result = resolve_category_reference(
+        CategoryReference(
+            surface_text="耳机",
+            candidates=[
+                CategoryCandidate(
+                    category="数码电子",
+                    sub_category="真无线耳机",
+                )
+            ],
+        ),
+        _category_catalog(),
+    )
+
+    assert result == CategoryResolution(
+        outcome="resolved",
+        scope=CategoryCandidate(
+            category="数码电子",
+            sub_category="真无线耳机",
+        ),
+    )
+
+
+def test_category_resolver_clarifies_all_multiple_catalog_scopes() -> None:
+    candidates = [
+        CategoryCandidate(category="服饰运动", sub_category="篮球鞋"),
+        CategoryCandidate(category="服饰运动", sub_category="跑步鞋"),
+    ]
+
+    result = resolve_category_reference(
+        CategoryReference(surface_text="鞋", candidates=candidates),
+        _category_catalog(),
+    )
+
+    assert result.outcome == "ambiguous"
+    assert result.candidate_scopes == candidates
+    assert result.message is not None
+    assert "篮球鞋" in result.message
+    assert "跑步鞋" in result.message
+
+
+def test_category_resolver_returns_unsupported_for_empty_or_invalid_scope() -> None:
+    catalog = _category_catalog()
+
+    empty = resolve_category_reference(
+        CategoryReference(surface_text="相机"),
+        catalog,
+    )
+    invalid = resolve_category_reference(
+        CategoryReference(
+            surface_text="耳机",
+            candidates=[
+                CategoryCandidate(
+                    category="服饰运动",
+                    sub_category="真无线耳机",
+                )
+            ],
+        ),
+        catalog,
+    )
+
+    assert empty.outcome == "unsupported"
+    assert empty.message == "当前商品目录暂不支持“相机”，请换一种商品类型。"
+    assert invalid.outcome == "unsupported"
+
+
+def test_category_resolver_intersects_pending_allowed_scopes() -> None:
+    running = CategoryCandidate(
+        category="服饰运动",
+        sub_category="跑步鞋",
+    )
+    result = resolve_category_reference(
+        CategoryReference(
+            surface_text="跑步鞋",
+            candidates=[
+                CategoryCandidate(
+                    category="数码电子",
+                    sub_category="真无线耳机",
+                ),
+                running,
+            ],
+        ),
+        _category_catalog(),
+        allowed_scopes=[running],
+    )
+
+    assert result == CategoryResolution(outcome="resolved", scope=running)
+
+
 def _state(
     product_ids: list[str], *, focus: str | None = None, seen_ids: list[str] | None = None
 ) -> ConversationState:
@@ -72,6 +205,28 @@ def _state(
 
 def _reference(**values: object) -> ProductReference:
     return ProductReference.model_validate(values)
+
+
+def _matrix_reference(
+    matched_ids: set[str],
+    *,
+    target_type: str = "product",
+    surface_text: str = "那个",
+) -> ProductReference:
+    return ProductReference.model_validate(
+        {
+            "target_type": target_type,
+            "surface_text": surface_text,
+            "kind": "demonstrative",
+            "candidate_matches": [
+                ReferenceCandidateMatch(
+                    product_id=product_id,
+                    matches=product_id in matched_ids,
+                )
+                for product_id in ("p1", "p2", "p3")
+            ],
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -196,6 +351,97 @@ def test_resolver_clarifies_when_a_product_brand_matches_multiple_candidates() -
 
     assert result.product_id is None
     assert result.needs_clarification is True
+
+
+def test_matrix_resolves_one_product_without_using_clue_kind() -> None:
+    result = resolve_reference(
+        _matrix_reference({"p3"}, surface_text="中间语义由模型判断"),
+        _state(["p1", "p2", "p3"]),
+        _three_product_catalog(),
+    )
+
+    assert result == ReferenceResolution(product_id="p3")
+
+
+def test_matrix_product_ambiguity_lists_only_matched_candidates() -> None:
+    result = resolve_reference(
+        _matrix_reference({"p1", "p2"}, surface_text="共享品牌那个"),
+        _state(["p1", "p2", "p3"]),
+        _three_product_catalog(),
+    )
+
+    assert result.product_id is None
+    assert result.needs_clarification is True
+    assert result.candidate_product_ids == ["p1", "p2"]
+    assert "Alpha One" in (result.clarification_message or "")
+    assert "Beta Two" in (result.clarification_message or "")
+    assert "Gamma Three" not in (result.clarification_message or "")
+
+
+def test_matrix_brand_target_allows_multiple_products_of_one_brand() -> None:
+    result = resolve_reference(
+        _matrix_reference(
+            {"p1", "p2"},
+            target_type="brand",
+            surface_text="共享品牌的",
+        ),
+        _state(["p1", "p2", "p3"]),
+        _three_product_catalog(),
+    )
+
+    assert result == ReferenceResolution(brand="共享品牌")
+
+
+def test_expected_product_target_overrides_model_brand_target() -> None:
+    result = resolve_reference(
+        _matrix_reference(
+            {"p3"},
+            target_type="brand",
+            surface_text="唯一品牌那个",
+        ),
+        _state(["p1", "p2", "p3"]),
+        _three_product_catalog(),
+        expected_target_type="product",
+    )
+
+    assert result == ReferenceResolution(product_id="p3")
+
+
+def test_pending_allowed_ids_prevent_escape_to_unmatched_product() -> None:
+    result = resolve_reference(
+        _matrix_reference({"p3"}, surface_text="第三个"),
+        _state(["p1", "p2", "p3"]),
+        _three_product_catalog(),
+        expected_target_type="product",
+        allowed_product_ids=("p1", "p2"),
+    )
+
+    assert result.product_id is None
+    assert result.needs_clarification is True
+    assert result.candidate_product_ids == ["p1", "p2"]
+    assert "Gamma Three" not in (result.clarification_message or "")
+
+
+def test_invalid_matrix_coverage_fails_closed_to_clarification() -> None:
+    incomplete = ProductReference(
+        target_type="product",
+        surface_text="第二个",
+        kind="ordinal",
+        ordinal=2,
+        candidate_matches=[
+            ReferenceCandidateMatch(product_id="p2", matches=True)
+        ],
+    )
+
+    result = resolve_reference(
+        incomplete,
+        _state(["p1", "p2", "p3"]),
+        _three_product_catalog(),
+    )
+
+    assert result.product_id is None
+    assert result.needs_clarification is True
+    assert result.candidate_product_ids == ["p1", "p2", "p3"]
 
 
 def test_resolver_matches_an_exact_casefolded_product_name_only() -> None:
