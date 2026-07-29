@@ -193,6 +193,17 @@ categoryless 的旧快照不自动迁移，因为仅凭 `semantic_terms` 无法�
 绑定视为可信结论，不能因为提示词只包含单个目标商品、未重复提供候选排名而重新质疑
 “第二款”等指代是否成立。
 
+结构化商品问答的事实载荷始终包含已解析商品的 `product_id`、标题和本次请求字段；
+展示价格仍读取最近候选中已经发送并持久化的 `display_price`。标题只为回答提供自然
+主语，不扩大允许回答的字段、SKU 或文本证据范围。回答应直接使用商品标题或用户自然
+称呼，不描述事实校验、证据选择或内部处理过程；整数金额不显示 `.0`，非整数金额最多
+保留两位小数。系统继续使用模型原生流式输出，不增加固定回答模板或流式短语替换。
+
+已有焦点商品时，“最贵的版本”“最便宜的配置”以及承接式的“最贵的呢”“最便宜的呢”
+都属于该商品的结构化 SKU 问答，解析为 `product_question + field=sku`；没有当前消息
+中的显式商品引用时保持 `reference=null`，由确定性指代消解使用 `focused_product_id`。
+这不属于最近候选之间的比较级指代，也不得转写为全局搜索的 `price_preference`。
+
 ## 接口与数据
 
 ### `TurnQuery`
@@ -275,6 +286,11 @@ SlotOperation
 `add/remove` 时提供；`clear` 清空该 key。数值条件的 `add/remove` 携带完整
 `NumericConstraint`，`clear` 不带值并清空整个数值条件列表。
 
+`constraints.price_preference` 的 `replace` 值只允许精确字符串 `"value"`，含义仅为
+性价比偏好。`SlotOperation` 在 Pydantic 模型边界拒绝 `most_expensive`、`cheapest`
+等未定义值，使结构化解析器先执行一次纠正重试；连续非法时返回安全解析错误，不让
+非法值进入 Query 编译与澄清状态。
+
 ### `ProductReference`
 
 ```json
@@ -304,6 +320,8 @@ SlotOperation
 商品追问使用独立结构，模型将问题分为允许直接读取的结构化字段（名称、品牌、类目、
 展示价格和 SKU）或开放语义问题，并保留用户问题文本。代码只对允许的结构化字段直接
 读取 Catalog；其他问题统一进入指定商品知识读取，不能相信模型自行给出的答案。
+结构化事实字典统一携带可信 Catalog 中的 `product_id` 和标题，再附加且只附加本次
+请求字段；`display_price` 使用最近候选快照，不重新从文本证据推断价格。
 
 ```text
 ProductQuestion
@@ -558,10 +576,12 @@ TurnQuery 的 taxonomy 后校验同时覆盖槽位品牌和
 | 自然语言品类唯一绑定、歧义恢复、越界保护与目录不支持短路 | `tests/unit/test_model_gateways.py::test_turn_query_parser_accepts_grounded_exact_category_candidates`、`test_turn_query_parser_rejects_invalid_category_references_after_retry`；`tests/unit/test_reference_resolver.py::test_category_resolver_resolves_one_exact_catalog_scope`、`test_category_resolver_clarifies_all_multiple_catalog_scopes`；`tests/unit/test_multi_turn_workflow.py::test_unique_category_reference_retrieves_only_the_resolved_scope`、`test_category_clarification_resumes_suspended_budget`、`test_category_clarification_answer_cannot_escape_pending_scopes`、`test_explicit_unsupported_category_skips_retrieval` |
 | 结果耗尽的 HTTP/SSE 与持久化边界 | `tests/integration/test_chat_api.py::test_compiled_http_more_results_exhaustion_preserves_follow_up_reference`；`tests/unit/test_multi_turn_workflow.py::test_failed_more_results_preserves_latest_reference_context`、`test_no_result_paths_persist_before_text_and_clear_latest_focus` |
 | 无显式商品 reference 的焦点/单候选回退与多候选澄清 | `tests/unit/test_multi_turn_workflow.py::test_reference_less_product_question_uses_focused_product`、`test_reference_less_structured_question_uses_focused_product_skus`、`test_reference_less_product_question_uses_only_recent_candidate`、`test_reference_less_product_question_with_multiple_candidates_clarifies` |
+| 焦点商品最高/最低 SKU 追问与非法价格偏好纠正 | `tests/unit/test_model_gateways.py::test_turn_query_prompt_contains_schema_taxonomy_and_complete_contract`、`test_turn_query_parser_corrects_invalid_expensive_price_preference`；`tests/unit/test_turn_query_models.py::test_price_preference_rejects_values_other_than_value`、`test_price_preference_accepts_value_or_clear` |
 | 引用必须来自当前消息原文，不能由候选或焦点补写 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_ungrounded_reference_to_none`、`test_turn_query_parser_rejects_twice_ungrounded_reference` |
 | TurnQuery 引用品牌 taxonomy 纠正与安全失败 | `tests/unit/test_model_gateways.py::test_turn_query_parser_corrects_invalid_reference_brand`、`test_turn_query_parser_normalizes_twice_invalid_reference_brand` |
 | 商品问答生成器信任已解析目标，不重新质疑序数绑定 | `tests/unit/test_multi_turn_workflow.py::test_semantic_question_fetches_only_target_chunks_and_persists_focus` |
 | Catalog 结构化事实与 Qdrant 精确商品 scroll | `tests/unit/test_multi_turn_workflow.py::test_structured_fields_are_catalog_and_current_snapshot_only`；`tests/unit/test_qdrant_filters.py::test_fetch_product_chunks_scrolls_all_pages_in_order_without_scores`；`tests/unit/test_retrieval_service.py::test_fetch_product_chunks_delegates_without_embedding_or_reranking` |
+| 商品问答自然主语、金额格式与内部术语隔离 | `tests/unit/test_multi_turn_workflow.py::test_structured_display_price_uses_latest_fact_and_persists_focus_before_text`、`test_structured_fields_are_catalog_and_current_snapshot_only`、`test_semantic_question_fetches_only_target_chunks_and_persists_focus`、`test_malicious_product_chunk_remains_single_line_untrusted_json_data`；`tests/unit/test_model_gateways.py::test_response_generator_yields_only_nonempty_text_deltas`；`tests/unit/test_workflow_stream.py::test_verified_prompt_contains_only_selected_evidence` |
 | SQLite 重建、隔离、版本冲突和错误归一化 | `tests/unit/test_conversation_repository.py::test_save_new_state_creates_parent_and_survives_repository_recreation`、`test_conversations_remain_isolated`、`test_stale_version_returns_retryable_conversation_conflict`、`test_invalid_persisted_state_is_normalized_without_content_leakage` |
 | 固定商品数据、无失效迁移、v1 无 Redis/MySQL | `tests/unit/test_conversation_repository.py::test_state_json_is_compact_domain_state_without_product_body` 固化只存 ID/领域状态的边界；固定数据和无 Redis/MySQL 是本文“范围”和“关键决策”的显式 v1 限制 |
 | HTTP/SSE 兼容及生成/保存失败顺序 | `tests/integration/test_chat_api.py::test_chat_stream_emits_start_products_text_and_end`、`test_generation_failure_after_products_is_partial`、`test_compiled_http_generation_failure_persists_candidates_for_follow_up_ordinal`、`test_compiled_graph_pre_product_errors_are_safe_over_http`；`tests/unit/test_multi_turn_workflow.py::test_persist_completes_before_first_product_and_exact_display_price_is_saved` |
@@ -588,10 +608,75 @@ env -u ALL_PROXY -u all_proxy .venv/bin/mypy src scripts
 `ALL_PROXY/all_proxy` 是为了避免当前开发机的 `socks://` 代理配置影响测试 HTTP
 客户端，不改变被测代码。
 
+2026-07-29 商品问答自然文案调整后执行：
+
+```bash
+env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q \
+  tests/unit/test_model_gateways.py \
+  tests/unit/test_workflow_stream.py \
+  tests/unit/test_multi_turn_workflow.py
+# 165 passed in 5.35s
+
+env -u ALL_PROXY -u all_proxy .venv/bin/ruff check \
+  src/shop_agent/services/dashscope_chat.py \
+  src/shop_agent/workflow/nodes.py \
+  tests/unit/test_model_gateways.py \
+  tests/unit/test_workflow_stream.py \
+  tests/unit/test_multi_turn_workflow.py
+# All checks passed!
+
+env -u ALL_PROXY -u all_proxy .venv/bin/mypy src/shop_agent
+# Success: no issues found in 38 source files
+
+env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q -p no:cacheprovider
+# 458 passed, 21 skipped in 8.25s
+```
+
+随后使用本地健康 Qdrant、真实 DashScope 和 `scripts/chat_client.py` 完成同一会话验收。
+连续换批至 OPPO Enco X4 后询问“最便宜的版本多少钱”，回复为
+“OPPO Enco X4 深度降噪双单元真无线蓝牙耳机售价1099元。”；继续询问最高版本与颜色，
+回复确认礼盒版 1249 元及曜石黑、月光白、薄雾紫。切换手机并追问中间机型重量与手感
+时，回复直接以 OPPO Reno 16 Pro 为主语。各轮均以 `status=completed` 结束，未出现
+“根据已校验事实”“根据证据”“系统已确认”或“代码已确定”等内部处理表述。临时
+客户端与 Uvicorn 服务在验收后正常退出。21 个跳过项仍全部是显式 opt-in 的 live
+测试；本次真实对话是单独的手工运行时验收，不将未执行的 live pytest 标记为通过。
+
+2026-07-29 焦点商品最高/最低 SKU 追问修复后执行：
+
+```bash
+env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q -p no:cacheprovider \
+  tests/unit/test_turn_query_models.py \
+  tests/unit/test_model_gateways.py \
+  tests/unit/test_multi_turn_query_compiler.py \
+  tests/unit/test_multi_turn_workflow.py
+# 254 passed in 5.21s
+
+env -u ALL_PROXY -u all_proxy .venv/bin/ruff check \
+  src/shop_agent/models/turn_query.py \
+  src/shop_agent/services/dashscope_chat.py \
+  tests/unit/test_turn_query_models.py \
+  tests/unit/test_model_gateways.py
+# All checks passed!
+
+env -u ALL_PROXY -u all_proxy .venv/bin/mypy src/shop_agent
+# Success: no issues found in 38 source files
+
+env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q -p no:cacheprovider
+# 463 passed, 21 skipped in 8.01s
+```
+
+随后在临时 8010 端口使用真实 DashScope 和新会话验收。先定位 Apple AirPods Pro 3 并
+询问最便宜版本，再输入“最贵的呢”；解析日志为 `intent=product_question`、
+`clue_kind=null`、`product_question_kind=structured`，确定性指代继续命中
+`p_digital_018`。最终回复马年特别款、MagSafe 充电盒、定制镌刻且含 AppleCare+ 的
+配置售价 2299 元，各轮均为 `status=completed`。临时客户端和 Uvicorn 服务随后退出。
+
 ## 变更记录
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
+| 2026-07-29 | 将焦点商品“最贵/最便宜版本”追问固定为 SKU 问答，并在 Pydantic 边界限制价格偏好枚举 | 避免承接式商品追问被误判为全局价格筛选，也防止 `most_expensive` 等非法值进入 Query 编译 |
+| 2026-07-29 | 为商品问答补充目标标题并自然化回答提示词 | 避免“该商品的价格为 1099.0 元”和“根据已校验事实”等机械表达，同时保持价格快照、事实白名单、注入防护与流式边界 |
 | 2026-07-28 | 纯换一批耗尽时保留上一批候选与焦点 | 无商品返回的轮次不应覆盖最近展示批次，使用户仍可继续询问上一批商品 |
 | 2026-07-28 | 增加自然语言品类候选、确定性唯一绑定、可续接歧义追问和目录不支持短路 | 避免“耳机”等用户说法只进入语义词而失去 Qdrant 品类硬过滤，导致换一批时混入手机或食品 |
 | 2026-07-28 | 区分结果耗尽、零匹配与候选信息不足，并改为后端固定文案 | 避免“没有更多商品”被误报为筛选失败，同时移除确定性无结果场景的回答模型调用 |

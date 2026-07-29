@@ -1,6 +1,6 @@
 # 跨品类商品约束与 SKU 匹配
 
-> 状态：开发中
+> 状态：已完成
 >
 > 代码入口：`src/shop_agent/models/query.py`、`src/shop_agent/sku_attributes.py`、`src/shop_agent/catalog.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/evidence.py`、`src/shop_agent/workflow/`
 
@@ -305,11 +305,19 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 
 ## 代码与验证
 
-### 已知问题
+### 完成状态
 
-- 复合商品短语同时包含多个合法子类词时，意图模型缺少稳定的中心词选择规则。例如“防晒精华”当前可能被解析为 `sub_category=防晒`、`required_features=["精华"]`，而不是以“精华”为商品子类。
+本文范围内的约束拆层、SKU 规范化、同一 SKU 联合匹配和语义证据三态准入均已实现。
 
-以上问题尚未修复，因此本功能保持“开发中”状态；当前实现是可验证的阶段性检查点。
+复合商品短语同时命中多个合法子类时，不再要求意图模型静默选择中心子类，也不能把
+另一个子类降级为 `required_features`。多轮 Query 引擎要求模型通过
+`category_reference.candidates` 返回所有合理的精确 Catalog 范围；代码按候选基数
+唯一绑定或保存 `ambiguous_category` 澄清状态。用户回答后只能在原候选集合内选择，
+并恢复被暂停的预算、品牌、功能和 SKU 等条件。该行为及状态恢复归属
+[多轮 Query 编译与指代消解](multi-turn-query-engine.md)。
+
+`supported` 与 `unknown` 的排序权重仍按“范围”章节明确留给后续评分设计，不阻塞本文
+定义的候选准入能力完成。
 
 已实现代码入口：
 
@@ -343,9 +351,9 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 
 验证命令与结果：
 
-- `uv run pytest -q -p no:cacheprovider`：176 passed，1 skipped；本次本地 Qdrant 集成测试实际执行并通过。
+- `uv run pytest -q -p no:cacheprovider`：458 passed，21 skipped。
 - `uv run ruff check .`：通过。
-- `uv run mypy src scripts`：34个源文件通过。
+- `uv run mypy src scripts`：39个源文件通过。
 - 真实数据专项测试确认4个一级类目、37个子类、112个商品及全部59种原始 SKU key 均可加载和规范化。
 
 ## 变更记录
@@ -361,3 +369,4 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 | 2026-07-25 | 将单轮证据模型调用并发上限固定为五 | 降低最多十个候选逐个等待造成的总耗时，不引入商业部署级全局限流或改变候选顺序 |
 | 2026-07-25 | 证据输出改为强制 Function Calling | 通过扁平工具参数 Schema 固定返回字段，并保留 Pydantic 与动态 condition ID 校验作为本地保障 |
 | 2026-07-27 | 数码电子数据扩充至 37 款 | 新增4款智能手机和8款真无线耳机，增加品牌、价位与连续推荐场景的候选覆盖 |
+| 2026-07-29 | 状态更新为已完成 | 多轮 Query 引擎已用 Catalog 候选基数和可恢复澄清关闭复合子类歧义；本文范围内实现与验证项均已完成 |

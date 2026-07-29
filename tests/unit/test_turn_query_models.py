@@ -182,6 +182,31 @@ def test_slot_operation_accepts_valid_sku_and_numeric_operations() -> None:
     assert numeric_operation.value == numeric
 
 
+@pytest.mark.parametrize("value", ["most_expensive", "cheapest", 1])
+def test_price_preference_rejects_values_other_than_value(value: object) -> None:
+    with pytest.raises(ValidationError, match="price preference"):
+        SlotOperation(
+            slot="constraints.price_preference",
+            operation="replace",
+            value=value,
+        )
+
+
+def test_price_preference_accepts_value_or_clear() -> None:
+    replacement = SlotOperation(
+        slot="constraints.price_preference",
+        operation="replace",
+        value="value",
+    )
+    clearing = SlotOperation(
+        slot="constraints.price_preference",
+        operation="clear",
+    )
+
+    assert replacement.value == "value"
+    assert clearing.value is None
+
+
 @pytest.mark.parametrize(
     "reference",
     [

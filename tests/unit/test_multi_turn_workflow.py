@@ -2987,8 +2987,16 @@ async def test_structured_display_price_uses_latest_fact_and_persists_focus_befo
     assert repository.record.state.query_snapshot == original_snapshot
     assert repository.record.state.recent_candidates == original_recent
     assert repository.record.state.seen_product_ids == original_seen
-    assert '"display_price":459.0' in harness.response.prompts[0]
-    assert '"display_price":401.0' not in harness.response.prompts[0]
+    prompt = harness.response.prompts[0]
+    assert '"product_id":"p2"' in prompt
+    assert '"title":"通勤耳机 2"' in prompt
+    assert '"display_price":459.0' in prompt
+    assert '"display_price":401.0' not in prompt
+    assert "直接回答用户问题" in prompt
+    assert "不要说明信息来源或内部处理方式" in prompt
+    assert "优先使用商品标题或用户自然称呼作主语" in prompt
+    assert "整数金额不保留小数点和末尾零" in prompt
+    assert "已校验事实" not in prompt
     assert harness.retrieval.retrieve_calls == []
     assert harness.retrieval.fetch_product_calls == []
     assert harness.retrieval.aggregate_calls == []
@@ -3048,6 +3056,8 @@ async def test_structured_fields_are_catalog_and_current_snapshot_only(
     )
 
     prompt = harness.response.prompts[0]
+    assert '"product_id":"p2"' in prompt
+    assert '"title":"通勤耳机 2"' in prompt
     assert all(value in prompt for value in required)
     assert all(value not in prompt for value in forbidden)
     assert harness.retrieval.retrieve_calls == []
@@ -3102,8 +3112,9 @@ async def test_semantic_question_fetches_only_target_chunks_and_persists_focus(
     prompt = harness.response.prompts[0]
     assert harness.retrieval.fetch_product_calls == ["p2"]
     assert all(value in prompt for value in (
-        "目标商品已由可信代码根据用户指代唯一确定",
+        "目标商品已经唯一确定",
         "不得重新判断、质疑或说明指代关系",
+        "直接回答用户问题",
         '"product_id":"p2"',
         '"title":"通勤耳机 2"',
         '"brand":"品牌 2"',
@@ -3112,6 +3123,8 @@ async def test_semantic_question_fetches_only_target_chunks_and_persists_focus(
         '"chunk_id":"p2:faq:1"',
         "官方说明可以短时浸水。",
     ))
+    assert "已校验事实" not in prompt
+    assert "可信代码" not in prompt
     assert all(value not in prompt for value in ("p1:summary", "p3:summary", "通勤耳机 1", "品牌 3"))
     assert "point-p2-summary" not in prompt
     assert "point-p2-faq" not in prompt

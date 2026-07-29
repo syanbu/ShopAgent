@@ -165,6 +165,9 @@ async def test_verified_prompt_contains_only_selected_evidence(tmp_path: Path) -
     assert "优惠券" in prompt
     assert "购买链接" in prompt
     assert "不得" in prompt
+    assert "可用商品信息" in prompt
+    assert "简洁、自然地说明推荐理由" in prompt
+    assert "已校验事实" not in prompt
 
 
 @pytest.mark.asyncio

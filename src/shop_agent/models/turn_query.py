@@ -195,6 +195,13 @@ class SlotOperation(BaseModel):
         elif self.value is None:
             raise ValueError("slot operations require a value")
 
+        if (
+            self.slot == "constraints.price_preference"
+            and self.operation == "replace"
+            and self.value != "value"
+        ):
+            raise ValueError("price preference replacement only accepts 'value'")
+
         if self.slot in _SCALAR_SLOTS:
             if self.operation not in {"replace", "clear"}:
                 raise ValueError("scalar slots only accept replace or clear")
