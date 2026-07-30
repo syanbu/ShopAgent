@@ -82,7 +82,9 @@ class FakeRetrievalService:
         self.fetch_product_calls: list[str] = []
         self.product_chunks: dict[str, list[EvidenceChunk]] = {}
         self.fetch_product_error: ServiceError | None = None
-        self.aggregate_calls: list[list[RetrievedChunk]] = []
+        self.aggregate_calls: list[
+            tuple[list[RetrievedChunk], int | None]
+        ] = []
         self.rerank_calls: list[tuple[str, list[ProductCandidate]]] = []
 
     async def retrieve_chunks(
@@ -126,14 +128,25 @@ class FakeRetrievalService:
         ]
 
     def aggregate_products(
-        self, chunks: Sequence[RetrievedChunk]
+        self,
+        chunks: Sequence[RetrievedChunk],
+        *,
+        max_evidence_chunks: int | None = 5,
     ) -> list[ProductCandidate]:
-        self.aggregate_calls.append(list(chunks))
-        chunks_by_product = {chunk.product_id: chunk for chunk in chunks}
+        self.aggregate_calls.append((list(chunks), max_evidence_chunks))
+        chunks_by_product: dict[str, list[RetrievedChunk]] = {}
+        for chunk in chunks:
+            chunks_by_product.setdefault(chunk.product_id, []).append(chunk)
         return [
             ProductCandidate(
                 product=product,
-                evidence=[chunks_by_product[product.product_id]],
+                evidence=(
+                    chunks_by_product[product.product_id]
+                    if max_evidence_chunks is None
+                    else chunks_by_product[product.product_id][
+                        :max_evidence_chunks
+                    ]
+                ),
             )
             for product in self.products
             if product.product_id in chunks_by_product
@@ -183,9 +196,45 @@ class FakeEvidenceService:
                     product_id=candidate.product.product_id,
                     checks=[],
                 ),
-                eligible=self.eligible,
+                eligible=(
+                    self.eligible
+                    and (category is None or candidate.product.category == category)
+                    and (
+                        sub_category is None
+                        or candidate.product.sub_category == sub_category
+                    )
+                    and (
+                        not constraints.include_brands
+                        or candidate.product.brand in constraints.include_brands
+                    )
+                    and candidate.product.brand not in constraints.exclude_brands
+                    and bool(
+                        self.catalog.matched_skus(
+                            candidate.product.product_id,
+                            constraints,
+                        )
+                    )
+                ),
                 rejection_reasons=[]
-                if self.eligible
+                if (
+                    self.eligible
+                    and (category is None or candidate.product.category == category)
+                    and (
+                        sub_category is None
+                        or candidate.product.sub_category == sub_category
+                    )
+                    and (
+                        not constraints.include_brands
+                        or candidate.product.brand in constraints.include_brands
+                    )
+                    and candidate.product.brand not in constraints.exclude_brands
+                    and bool(
+                        self.catalog.matched_skus(
+                            candidate.product.product_id,
+                            constraints,
+                        )
+                    )
+                )
                 else ["semantic_conditions_not_satisfied"],
             )
             for candidate in candidates

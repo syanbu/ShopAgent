@@ -49,6 +49,22 @@ async def _post(
         return await client.post("/api/v1/chat/stream", json=payload)
 
 
+def _enable_exact_product_chunks(retrieval: Any) -> None:
+    async def fetch_product_chunks(product_id: str) -> list[EvidenceChunk]:
+        return [
+            EvidenceChunk(
+                chunk_id=f"{product_id}:summary",
+                point_id=f"point-{product_id}",
+                product_id=product_id,
+                chunk_type="product_summary",
+                text="已验证的商品知识。",
+                source_path=f"data/{product_id}.json",
+            )
+        ]
+
+    retrieval.fetch_product_chunks = fetch_product_chunks
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_emits_start_products_text_and_end(
     sample_dataset_root: Path,
@@ -356,6 +372,7 @@ async def test_compiled_graph_persists_refinement_and_isolates_conversations(
     dependencies, parser, repository, retrieval, _ = compiled_chat_dependencies(
         tmp_path, turns=turns
     )
+    _enable_exact_product_chunks(retrieval)
 
     first = await _post(
         dependencies,
@@ -395,7 +412,7 @@ async def test_compiled_graph_persists_refinement_and_isolates_conversations(
     assert parser.contexts[2].recent_candidates == []
     assert parser.contexts[2].focused_product_id is None
     assert retrieval.calls[1].max_price == 300
-    assert retrieval.calls[1].excluded_product_ids == ()
+    assert retrieval.calls[1].excluded_product_ids == ("p1", "p2", "p3")
     c1 = await repository.load("c1")
     c2 = await repository.load("c2")
     assert c1 is not None
@@ -408,6 +425,77 @@ async def test_compiled_graph_persists_refinement_and_isolates_conversations(
     assert c2.state.query_snapshot.constraints.max_price is None
     assert c2.state.recent_candidates
     assert c2.state.seen_product_ids
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_hard_tightening_reemits_only_eligible_cards(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {"slot": "category", "operation": "replace", "value": "数码电子"},
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "refine_search",
+                "slot_operations": [
+                    {
+                        "slot": "constraints.exclude_brands",
+                        "operation": "add",
+                        "value": "测试品牌 1",
+                    }
+                ],
+            }
+        ),
+    ]
+    dependencies, _, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=turns,
+    )
+    _enable_exact_product_chunks(retrieval)
+
+    first = await _post(
+        dependencies,
+        {"conversation_id": "stable-refinement", "message": "推荐蓝牙耳机"},
+    )
+    refined = await _post(
+        dependencies,
+        {"conversation_id": "stable-refinement", "message": "不要测试品牌 1"},
+    )
+
+    first_events = parse_sse(first.text)
+    refined_events = parse_sse(refined.text)
+    assert [
+        event.data["product_id"]
+        for event in first_events
+        if event.name == "product"
+    ] == ["p1", "p2", "p3"]
+    assert [
+        event.data["product_id"]
+        for event in refined_events
+        if event.name == "product"
+    ] == ["p2", "p3"]
+    assert refined_events[-1].data["status"] == "completed"
+    assert retrieval.calls[1].excluded_product_ids == ("p1", "p2", "p3")
+
+    saved = await repository.load("stable-refinement")
+    assert saved is not None
+    assert [
+        candidate.product_id for candidate in saved.state.recent_candidates
+    ] == ["p2", "p3"]
+    assert saved.state.seen_product_ids == ["p1", "p2", "p3"]
 
 
 @pytest.mark.asyncio

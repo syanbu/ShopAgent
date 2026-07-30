@@ -28,7 +28,10 @@ class RetrievalOperations(Protocol):
     async def fetch_product_chunks(self, product_id: str) -> list[EvidenceChunk]: ...
 
     def aggregate_products(
-        self, chunks: Sequence[RetrievedChunk]
+        self,
+        chunks: Sequence[RetrievedChunk],
+        *,
+        max_evidence_chunks: int | None = 5,
     ) -> list[ProductCandidate]: ...
 
     async def rerank_candidates(

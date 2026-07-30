@@ -42,6 +42,7 @@ class ShoppingState(TypedDict, total=False):
         "switch_category",
         "more_results",
     ]
+    result_strategy: Literal["stable_refine", "full_rerank", "more_results"]
     pending_expected_version: int | None
     product_knowledge: list[EvidenceChunk]
     parsed_intent: ParsedIntent

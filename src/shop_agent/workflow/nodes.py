@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -71,8 +72,8 @@ NO_RESULT_MESSAGES: dict[NoResultReason, str] = {
         "当前筛选条件下没有找到匹配商品，建议您放宽或修改筛选条件。"
     ),
     "insufficient_evidence": (
-        "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
-        "建议您调整筛选条件。"
+        "当前没有找到同时满足全部筛选条件的商品，"
+        "建议您放宽或修改筛选条件。"
     ),
 }
 
@@ -86,6 +87,19 @@ def _single_line_json(value: object) -> str:
     return encoded.translate(_UNICODE_LINE_SEPARATOR_ESCAPES)
 
 
+def _deduplicate_chunks(
+    chunks: Sequence[RetrievedChunk],
+) -> list[RetrievedChunk]:
+    unique: list[RetrievedChunk] = []
+    seen_chunk_ids: set[str] = set()
+    for chunk in chunks:
+        if chunk.chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk.chunk_id)
+        unique.append(chunk)
+    return unique
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowNodes:
     dependencies: WorkflowDependencies
@@ -97,6 +111,31 @@ class WorkflowNodes:
             self.dependencies.turn_query_parser,
             self.dependencies.conversation_repository,
         )
+
+    async def _fetch_stable_refinement_chunks(
+        self,
+        state: ShoppingState,
+        product_id: str,
+    ) -> list[EvidenceChunk]:
+        try:
+            return await self.dependencies.retrieval_service.fetch_product_chunks(
+                product_id
+            )
+        except ServiceError as error:
+            if not error.retryable:
+                raise
+            logger.warning(
+                "stable_refinement_exact_fetch_failed %s",
+                _single_line_json(
+                    {
+                        "request_id": state.get("request_id"),
+                        "conversation_id": state.get("conversation_id"),
+                        "product_id": product_id,
+                        "error_code": error.code,
+                    }
+                ),
+            )
+            return []
 
     async def load_conversation(self, state: ShoppingState) -> dict[str, object]:
         _, repository = self._require_multi_turn_dependencies()
@@ -504,6 +543,7 @@ class WorkflowNodes:
             "conversation_state": result.state,
             "query_snapshot": result.snapshot,
             "search_intent": result.intent,
+            "result_strategy": result.result_strategy,
             "parsed_intent": result.parsed_intent,
             "response_mode": "shopping",
         }
@@ -512,14 +552,57 @@ class WorkflowNodes:
         intent = state["parsed_intent"].model_copy(
             update={"constraints": state["effective_constraints"]}
         )
-        chunks = await self.dependencies.retrieval_service.retrieve_chunks(
-            intent,
-            excluded_product_ids=(
-                tuple(state["conversation_state"].seen_product_ids)
-                if state["search_intent"] == "more_results"
-                else ()
-            ),
+        conversation = state["conversation_state"]
+        result_strategy = state["result_strategy"]
+        excluded_ids = (
+            tuple(conversation.seen_product_ids)
+            if result_strategy in {"stable_refine", "more_results"}
+            else ()
         )
+        global_chunks = await self.dependencies.retrieval_service.retrieve_chunks(
+            intent,
+            excluded_product_ids=excluded_ids,
+        )
+        chunks = global_chunks
+        if result_strategy == "stable_refine":
+            exact_batches = await asyncio.gather(
+                *(
+                    self._fetch_stable_refinement_chunks(
+                        state,
+                        candidate.product_id
+                    )
+                    for candidate in conversation.recent_candidates
+                )
+            )
+            exact_chunks = [
+                RetrievedChunk.model_validate(
+                    {
+                        **chunk.model_dump(mode="python"),
+                        "score": 1.0,
+                    }
+                )
+                for batch in exact_batches
+                for chunk in batch
+            ]
+            exact_product_ids = {chunk.product_id for chunk in exact_chunks}
+            missing_recent_ids = {
+                candidate.product_id
+                for candidate in conversation.recent_candidates
+                if candidate.product_id not in exact_product_ids
+            }
+            if missing_recent_ids:
+                fallback_chunks = (
+                    await self.dependencies.retrieval_service.retrieve_chunks(
+                        intent,
+                        excluded_product_ids=(),
+                    )
+                )
+                exact_chunks.extend(
+                    chunk
+                    for chunk in fallback_chunks
+                    if chunk.product_id in missing_recent_ids
+                )
+            chunks = _deduplicate_chunks([*exact_chunks, *global_chunks])
         updates: dict[str, object] = {"retrieved_chunks": chunks}
         if not chunks:
             updates.update(
@@ -531,9 +614,27 @@ class WorkflowNodes:
         return updates
 
     async def aggregate_products(self, state: ShoppingState) -> dict[str, object]:
-        candidates = self.dependencies.retrieval_service.aggregate_products(
-            state["retrieved_chunks"]
+        chunks = state["retrieved_chunks"]
+        if state["result_strategy"] != "stable_refine":
+            candidates = self.dependencies.retrieval_service.aggregate_products(
+                chunks
+            )
+            return {"candidates": candidates}
+
+        recent_ids = {
+            candidate.product_id
+            for candidate in state["conversation_state"].recent_candidates
+        }
+        retained_candidates = (
+            self.dependencies.retrieval_service.aggregate_products(
+                [chunk for chunk in chunks if chunk.product_id in recent_ids],
+                max_evidence_chunks=None,
+            )
         )
+        unseen_candidates = self.dependencies.retrieval_service.aggregate_products(
+            [chunk for chunk in chunks if chunk.product_id not in recent_ids]
+        )
+        candidates = [*retained_candidates, *unseen_candidates]
         return {"candidates": candidates}
 
     async def semantic_rerank(self, state: ShoppingState) -> dict[str, object]:
@@ -567,11 +668,35 @@ class WorkflowNodes:
         return updates
 
     async def decide_candidates(self, state: ShoppingState) -> dict[str, object]:
+        selection_limit = self.dependencies.settings.final_product_limit
+        if state["result_strategy"] == "stable_refine":
+            selection_limit = len(state["validated_candidates"])
         selected = self.dependencies.evidence_service.select_candidates(
             state["validated_candidates"],
-            self.dependencies.settings.final_product_limit,
+            selection_limit,
             constraints=state["effective_constraints"],
         )
+        if state["result_strategy"] == "stable_refine":
+            selected_by_id = {item.product_id: item for item in selected}
+            conversation = state["conversation_state"]
+            survivors = [
+                selected_by_id[candidate.product_id]
+                for candidate in conversation.recent_candidates
+                if candidate.product_id in selected_by_id
+            ][: self.dependencies.settings.final_product_limit]
+            survivor_ids = {item.product_id for item in survivors}
+            seen_ids = set(conversation.seen_product_ids)
+            fillers = [
+                item
+                for item in selected
+                if item.product_id not in survivor_ids
+                and item.product_id not in seen_ids
+            ]
+            remaining = max(
+                0,
+                self.dependencies.settings.final_product_limit - len(survivors),
+            )
+            selected = [*survivors, *fillers[:remaining]]
         updates: dict[str, object] = {
             "selected_products": selected,
             "response_mode": "shopping",
@@ -615,7 +740,7 @@ class WorkflowNodes:
         conversation = state["conversation_state"]
         seen_ids = (
             _stable_exact_ids([*conversation.seen_product_ids, *selected_ids])
-            if state["search_intent"] == "more_results"
+            if state["search_intent"] in {"refine_search", "more_results"}
             else selected_ids
         )
         updated = conversation.model_copy(
@@ -646,9 +771,13 @@ class WorkflowNodes:
         _, repository = self._require_multi_turn_dependencies()
         conversation = state["conversation_state"]
         preserve_latest_batch = state["search_intent"] == "more_results"
+        preserve_seen_history = state["search_intent"] in {
+            "refine_search",
+            "more_results",
+        }
         seen_ids = (
             list(conversation.seen_product_ids)
-            if preserve_latest_batch
+            if preserve_seen_history
             else []
         )
         updated = conversation.model_copy(
@@ -1011,9 +1140,28 @@ def _merge_pending_turn(
     if pending.kind == "missing_context" and not _has_explicit_query_progress(answer):
         return None
 
+    suspended_slot_operations = suspended.slot_operations
+    if answer.approximate_price is not None:
+        suspended_slot_operations = [
+            operation
+            for operation in suspended_slot_operations
+            if operation.slot
+            not in {
+                "constraints.min_price",
+                "constraints.max_price",
+            }
+        ]
     slot_operations = _merge_slot_operations(
-        suspended.slot_operations,
+        suspended_slot_operations,
         answer.slot_operations,
+    )
+    answer_has_direct_price = any(
+        operation.slot
+        in {
+            "constraints.min_price",
+            "constraints.max_price",
+        }
+        for operation in answer.slot_operations
     )
 
     answer_semantic = [
@@ -1040,9 +1188,28 @@ def _merge_pending_turn(
         "intent": intent,
         "slot_operations": slot_operations,
         "semantic_term_operations": semantic_operations,
-        "relative_price": answer.relative_price
-        if answer.relative_price is not None
-        else suspended.relative_price,
+        "relative_price": (
+            None
+            if answer.approximate_price is not None
+            else (
+                answer.relative_price
+                if answer.relative_price is not None
+                else suspended.relative_price
+            )
+        ),
+        "approximate_price": (
+            answer.approximate_price.model_copy(deep=True)
+            if answer.approximate_price is not None
+            else (
+                None
+                if answer_has_direct_price or answer.relative_price is not None
+                else (
+                    suspended.approximate_price.model_copy(deep=True)
+                    if suspended.approximate_price is not None
+                    else None
+                )
+            )
+        ),
         "reference": answer.reference.model_copy(deep=True)
         if answer.reference is not None
         else (
@@ -1176,6 +1343,8 @@ def _has_explicit_query_progress(answer: TurnQuery) -> bool:
         answer.category_reference
         or answer.slot_operations
         or answer.semantic_term_operations
+        or answer.relative_price is not None
+        or answer.approximate_price is not None
     )
 
 
@@ -1537,10 +1706,25 @@ def build_verified_response_prompt(
         for selected_product in selected
     ]
     facts_json = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+    refinement_instruction = ""
+    if state.get("search_intent") == "refine_search":
+        refinement_instruction = (
+            "先用一句话简短确认已应用本轮筛选或偏好变化。"
+        )
+    count_instruction = ""
+    if (
+        state.get("search_intent") == "refine_search"
+        and len(selected) < dependencies.settings.final_product_limit
+    ):
+        count_instruction = (
+            f"本轮筛选后展示 {len(selected)} 款符合条件的商品，"
+            "请如实说明本轮展示数量，不得声称全库只有这些商品。"
+        )
     return (
         "你是文本导购助手。请根据下方可用商品信息，简洁、自然地说明推荐理由。"
         "直接给出推荐，不要说明信息来源、校验过程或内部处理方式。\n"
         f"{SAFETY_RULES}\n"
+        f"{refinement_instruction}{count_instruction}\n"
         f"用户原话：{user_message}\n"
         f"可用商品信息：{facts_json}"
     )

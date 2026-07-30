@@ -4,6 +4,7 @@ from pydantic import ValidationError
 import shop_agent.models as public_models
 from shop_agent.models.query import NumericConstraint
 from shop_agent.models.turn_query import (
+    ApproximatePrice,
     CategoryCandidate,
     CategoryReference,
     ProductQuestion,
@@ -374,6 +375,117 @@ def test_semantic_term_add_strips_surrounding_whitespace() -> None:
     operation = SemanticTermOperation(operation="add", value="  通勤  ")
 
     assert operation.value == "通勤"
+
+
+def test_semantic_term_prioritize_requires_and_normalizes_a_value() -> None:
+    operation = SemanticTermOperation(operation="prioritize", value="  续航  ")
+
+    assert operation.value == "续航"
+
+    with pytest.raises(ValidationError):
+        SemanticTermOperation(operation="prioritize")
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_kind", "expected_value"),
+    [
+        (
+            {"mode": "target", "amount": 5000},
+            "percent",
+            10,
+        ),
+        (
+            {
+                "mode": "budget_cap",
+                "amount": 5000,
+                "tolerance_kind": "absolute",
+                "tolerance_value": 300,
+            },
+            "absolute",
+            300,
+        ),
+    ],
+)
+def test_approximate_price_accepts_default_and_explicit_tolerance(
+    payload: dict[str, object],
+    expected_kind: str,
+    expected_value: float,
+) -> None:
+    approximate = ApproximatePrice.model_validate(payload)
+
+    assert approximate.tolerance_kind == expected_kind
+    assert approximate.tolerance_value == expected_value
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"mode": "target", "amount": -1},
+        {"mode": "target", "amount": 5000, "tolerance_value": 0},
+        {
+            "mode": "target",
+            "amount": 5000,
+            "tolerance_kind": "percent",
+            "tolerance_value": 100,
+        },
+    ],
+)
+def test_approximate_price_rejects_invalid_values(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        ApproximatePrice.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"mode": "target", "amount": float("inf")},
+        {
+            "mode": "target",
+            "amount": 5000,
+            "tolerance_kind": "absolute",
+            "tolerance_value": float("inf"),
+        },
+    ],
+)
+def test_approximate_price_rejects_non_finite_values(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="finite"):
+        ApproximatePrice.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "slot_operations": [
+                {
+                    "slot": "constraints.max_price",
+                    "operation": "replace",
+                    "value": 5500,
+                }
+            ]
+        },
+        {"relative_price": "cheaper"},
+    ],
+)
+def test_approximate_price_cannot_coexist_with_other_price_operations(
+    extra: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="approximate_price"):
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "refine_search",
+                "approximate_price": {
+                    "mode": "target",
+                    "amount": 5000,
+                },
+                **extra,
+            }
+        )
 
 
 def test_turn_query_rejects_conflicting_slot_operations() -> None:

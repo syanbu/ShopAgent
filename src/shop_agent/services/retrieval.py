@@ -69,8 +69,13 @@ class RetrievalService:
         return await self._store.fetch_product_chunks(product_id.strip())
 
     def aggregate_products(
-        self, chunks: Sequence[RetrievedChunk]
+        self,
+        chunks: Sequence[RetrievedChunk],
+        *,
+        max_evidence_chunks: int | None = 5,
     ) -> list[ProductCandidate]:
+        if max_evidence_chunks is not None and max_evidence_chunks < 0:
+            raise ValueError("max_evidence_chunks must be non-negative or None")
         grouped: dict[str, list[RetrievedChunk]] = {}
         products: dict[str, Product] = {}
         for chunk in chunks:
@@ -88,12 +93,19 @@ class RetrievalService:
         candidates = [
             ProductCandidate(
                 product=products[product_id],
-                evidence=sorted(
-                    evidence,
-                    key=lambda chunk: (-chunk.score, chunk.chunk_id),
-                )[:5],
+                evidence=(
+                    ordered_evidence
+                    if max_evidence_chunks is None
+                    else ordered_evidence[:max_evidence_chunks]
+                ),
             )
             for product_id, evidence in grouped.items()
+            for ordered_evidence in [
+                sorted(
+                    evidence,
+                    key=lambda chunk: (-chunk.score, chunk.chunk_id),
+                )
+            ]
         ]
         return candidates[: self._settings.rerank_product_limit]
 

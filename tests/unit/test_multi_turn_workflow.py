@@ -249,6 +249,21 @@ async def _drain_graph(
     ]
 
 
+def _seed_exact_product_chunks(harness: Any, *product_ids: str) -> None:
+    for product_id in product_ids:
+        product = harness.catalog.get(product_id)
+        harness.retrieval.product_chunks[product_id] = [
+            EvidenceChunk(
+                chunk_id=f"{product_id}:summary",
+                point_id=f"point-{product_id}",
+                product_id=product_id,
+                chunk_type="product_summary",
+                text=f"{product.title} 结构化商品证据",
+                source_path=f"data/{product_id}.json",
+            )
+        ]
+
+
 @pytest.mark.asyncio
 async def test_unique_category_reference_retrieves_only_the_resolved_scope(
     tmp_path: Path,
@@ -566,6 +581,9 @@ async def _observe_acceptance_turn(
 def _assert_acceptance_search_turn(
     observation: AcceptanceTurnObservation,
     product_ids: tuple[str, ...],
+    *,
+    exact_fetches: tuple[str, ...] = (),
+    aggregate_count: int = 1,
 ) -> None:
     assert observation.event_names == (
         *("product" for _ in product_ids),
@@ -576,8 +594,8 @@ def _assert_acceptance_search_turn(
     assert observation.save_count == 1
     assert observation.event_save_counts == (1,) * len(observation.event_names)
     assert len(observation.retrieve_calls) == 1
-    assert observation.focused_fetches == ()
-    assert observation.aggregate_count == 1
+    assert observation.focused_fetches == exact_fetches
+    assert observation.aggregate_count == aggregate_count
     assert observation.rerank_count == 1
     assert observation.evidence_validate_count == 1
     assert observation.evidence_select_count == 1
@@ -625,6 +643,7 @@ async def test_acceptance_running_shoes_refinements_retain_feature_and_budget(
         product_pairs=[("服饰运动", "跑步鞋")] * 3,
         price_start=99,
     )
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
     parser = FakeTurnQueryParser(
         [
             _search_turn(
@@ -647,16 +666,16 @@ async def test_acceptance_running_shoes_refinements_retain_feature_and_budget(
                     ],
                 }
             ),
-            _search_turn(
-                "refine_search",
-                [
-                    {
-                        "slot": "constraints.max_price",
-                        "operation": "replace",
-                        "value": 500,
-                    }
-                ],
-            ),
+                _search_turn(
+                    "refine_search",
+                    [
+                        {
+                            "slot": "constraints.max_price",
+                            "operation": "replace",
+                            "value": 500,
+                        }
+                    ],
+                ),
         ]
     )
     repository = FakeConversationRepository()
@@ -671,9 +690,20 @@ async def test_acceptance_running_shoes_refinements_retain_feature_and_budget(
         CandidateReference(rank=2, product_id="p2", display_price=101),
         CandidateReference(rank=3, product_id="p3", display_price=102),
     ]
-    for observation in (first, second, third):
-        _assert_acceptance_search_turn(observation, ("p1", "p2", "p3"))
-        assert observation.retrieve_calls[0].excluded_product_ids == ()
+    _assert_acceptance_search_turn(first, ("p1", "p2", "p3"))
+    assert first.retrieve_calls[0].excluded_product_ids == ()
+    for observation in (second, third):
+        _assert_acceptance_search_turn(
+            observation,
+            ("p1", "p2", "p3"),
+            exact_fetches=("p1", "p2", "p3"),
+            aggregate_count=2,
+        )
+        assert observation.retrieve_calls[0].excluded_product_ids == (
+            "p1",
+            "p2",
+            "p3",
+        )
     assert [first.version, second.version, third.version] == [1, 2, 3]
     assert first.state.query_snapshot == QuerySnapshot(
         category="服饰运动",
@@ -999,6 +1029,7 @@ async def test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent(
     tmp_path: Path,
 ) -> None:
     harness = build_harness(tmp_path, price_start=99)
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
     for product, price in zip(harness.catalog.all(), (399.0, 459.0, 529.0), strict=True):
         product.base_price = price
         product.skus[0].price = price
@@ -1035,7 +1066,7 @@ async def test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent(
         529,
     ]
     assert displayed.state.focused_product_id is None
-    assert cheaper.retrieve_calls[0].excluded_product_ids == ()
+    assert cheaper.retrieve_calls[0].excluded_product_ids == ("p1", "p2", "p3")
     assert cheaper.retrieve_calls[0].intent.constraints.max_price == 398.99
     assert cheaper.state.query_snapshot == QuerySnapshot(
         category="数码电子",
@@ -1043,7 +1074,7 @@ async def test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent(
         constraints=SearchConstraints(max_price=398.99),
     )
     assert cheaper.state.recent_candidates == []
-    assert cheaper.state.seen_product_ids == []
+    assert cheaper.state.seen_product_ids == ["p1", "p2", "p3"]
     _assert_acceptance_persisted_state(
         displayed,
         snapshot=QuerySnapshot(category="数码电子", sub_category="蓝牙耳机"),
@@ -1064,7 +1095,7 @@ async def test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent(
         ),
         recent_candidates=[],
         focused_product_id=None,
-        seen_product_ids=[],
+        seen_product_ids=["p1", "p2", "p3"],
     )
 
 
@@ -1848,6 +1879,72 @@ def test_missing_context_answer_without_explicit_query_progress_returns_none() -
     assert _merge_pending_turn(pending, answer) is None
 
 
+def test_missing_context_approximate_price_answer_replaces_suspended_price() -> None:
+    pending = PendingClarification(
+        kind="missing_context",
+        suspended_turn_query=_search_turn(
+            "refine_search",
+            [
+                {
+                    "slot": "constraints.max_price",
+                    "operation": "replace",
+                    "value": 300,
+                }
+            ],
+        ),
+    )
+    answer = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "clarification_answer",
+            "approximate_price": {
+                "mode": "target",
+                "amount": 5000,
+            },
+        }
+    )
+
+    restored = _merge_pending_turn(pending, answer)
+
+    assert restored is not None
+    assert restored.intent == "new_search"
+    assert restored.slot_operations == []
+    assert restored.relative_price is None
+    assert restored.approximate_price == answer.approximate_price
+
+
+def test_clarification_direct_price_answer_clears_suspended_approximate_price() -> None:
+    pending = PendingClarification(
+        kind="condition_conflict",
+        suspended_turn_query=TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "refine_search",
+                "approximate_price": {
+                    "mode": "target",
+                    "amount": 5000,
+                },
+            }
+        ),
+    )
+    answer = _search_turn(
+        "clarification_answer",
+        [
+            {
+                "slot": "constraints.max_price",
+                "operation": "replace",
+                "value": 4800,
+            }
+        ],
+    )
+
+    restored = _merge_pending_turn(pending, answer)
+
+    assert restored is not None
+    assert restored.approximate_price is None
+    assert restored.slot_operations == answer.slot_operations
+
+
 @pytest.mark.asyncio
 async def test_condition_conflict_answer_overrides_boundary_and_resumes_retrieval(
     tmp_path: Path,
@@ -2487,6 +2584,7 @@ async def test_refine_uses_compiled_snapshot_and_persists_displayed_batch(
     tmp_path: Path,
 ) -> None:
     harness = build_harness(tmp_path, price_start=99)
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
     original = _conversation()
     original_copy = original.model_copy(deep=True)
     repository = FakeConversationRepository(
@@ -2514,7 +2612,8 @@ async def test_refine_uses_compiled_snapshot_and_persists_displayed_batch(
 
     call = harness.retrieval.retrieve_calls[0]
     assert call.intent.constraints.max_price == 300
-    assert call.excluded_product_ids == ()
+    assert call.excluded_product_ids == ("p-old", "p1", "p2", "p3")
+    assert harness.retrieval.fetch_product_calls == ["p1", "p2", "p3"]
     assert repository.record is not None
     persisted = repository.record.state
     assert persisted.query_snapshot is not None
@@ -2524,13 +2623,278 @@ async def test_refine_uses_compiled_snapshot_and_persists_displayed_batch(
         "p2",
         "p3",
     ]
-    assert persisted.seen_product_ids == ["p1", "p2", "p3"]
+    assert persisted.seen_product_ids == ["p-old", "p1", "p2", "p3"]
     assert original == original_copy
     assert [part["data"]["event"] for part in events[:3]] == [
         "product",
         "product",
         "product",
     ]
+
+
+@pytest.mark.asyncio
+async def test_hard_tightening_preserves_eligible_order_and_fills_with_unseen(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path, product_count=5, price_start=99)
+    stored = _conversation()
+    stored = stored.model_copy(
+        update={"seen_product_ids": ["p1", "p2", "p3"]},
+        deep=True,
+    )
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=2)
+    )
+    parser = FakeTurnQueryParser(
+        [
+            _search_turn(
+                "refine_search",
+                [
+                    {
+                        "slot": "constraints.exclude_brands",
+                        "operation": "add",
+                        "value": "品牌 1",
+                    }
+                ],
+            )
+        ]
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "不要品牌 1",
+    )
+
+    assert harness.retrieval.retrieve_calls[0].excluded_product_ids == (
+        "p1",
+        "p2",
+        "p3",
+    )
+    assert harness.retrieval.fetch_product_calls == ["p1", "p2", "p3"]
+    assert repository.record is not None
+    persisted = repository.record.state
+    assert [item.product_id for item in persisted.recent_candidates] == [
+        "p2",
+        "p3",
+        "p4",
+    ]
+    assert persisted.seen_product_ids == ["p1", "p2", "p3", "p4"]
+    assert [
+        part["data"]["data"]["product_id"]
+        for part in events
+        if part["data"]["event"] == "product"
+    ] == ["p2", "p3", "p4"]
+
+
+@pytest.mark.asyncio
+async def test_hard_tightening_returns_fewer_cards_when_unseen_fill_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path, product_count=3, price_start=99)
+    stored = _conversation()
+    stored = stored.model_copy(
+        update={"seen_product_ids": ["p1", "p2", "p3"]},
+        deep=True,
+    )
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=2)
+    )
+    parser = FakeTurnQueryParser(
+        [
+            _search_turn(
+                "refine_search",
+                [
+                    {
+                        "slot": "constraints.exclude_brands",
+                        "operation": "add",
+                        "value": "品牌 1",
+                    }
+                ],
+            )
+        ]
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "不要品牌 1",
+    )
+
+    assert repository.record is not None
+    assert [
+        item.product_id for item in repository.record.state.recent_candidates
+    ] == ["p2", "p3"]
+    assert repository.record.state.seen_product_ids == ["p1", "p2", "p3"]
+    assert sum(part["data"]["event"] == "product" for part in events) == 2
+    assert "本轮筛选后展示 2 款" in harness.response.prompts[0]
+    assert "不得声称全库只有这些商品" in harness.response.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_stable_refinement_keeps_full_unseen_pool_beyond_aggregate_limit(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path, product_count=13, price_start=99)
+    stored = _conversation().model_copy(
+        update={"seen_product_ids": ["p1", "p2", "p3"]},
+        deep=True,
+    )
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
+    aggregate_products = harness.retrieval.aggregate_products
+
+    def aggregate_with_production_limit(
+        chunks: Any,
+        *,
+        max_evidence_chunks: int | None = 5,
+    ) -> Any:
+        return aggregate_products(
+            chunks,
+            max_evidence_chunks=max_evidence_chunks,
+        )[:10]
+
+    harness.retrieval.aggregate_products = aggregate_with_production_limit  # type: ignore[method-assign]
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=2)
+    )
+    parser = FakeTurnQueryParser(
+        [
+            _search_turn(
+                "refine_search",
+                [
+                    {
+                        "slot": "constraints.exclude_brands",
+                        "operation": "add",
+                        "value": f"品牌 {index}",
+                    }
+                    for index in range(1, 11)
+                ],
+            )
+        ]
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "不要品牌 1 到品牌 10",
+    )
+
+    assert repository.record is not None
+    assert [
+        candidate.product_id
+        for candidate in repository.record.state.recent_candidates
+    ] == ["p11", "p12", "p13"]
+    assert [
+        part["data"]["data"]["product_id"]
+        for part in events
+        if part["data"]["event"] == "product"
+    ] == ["p11", "p12", "p13"]
+
+
+@pytest.mark.asyncio
+async def test_stable_refinement_validates_all_exact_evidence_chunks(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path, product_count=4, price_start=99)
+    stored = _conversation().model_copy(
+        update={"seen_product_ids": ["p1", "p2", "p3"]},
+        deep=True,
+    )
+    _seed_exact_product_chunks(harness, "p2", "p3")
+    product = harness.catalog.get("p1")
+    harness.retrieval.product_chunks["p1"] = [
+        EvidenceChunk(
+            chunk_id=f"p1:chunk:{index}",
+            point_id=f"point-p1-{index}",
+            product_id="p1",
+            chunk_type="product_summary" if index == 0 else "user_review",
+            text=f"{product.title} 证据 {index}",
+            source_path="data/p1.json",
+        )
+        for index in range(6)
+    ]
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=2)
+    )
+    parser = FakeTurnQueryParser(
+        [
+                _search_turn(
+                    "refine_search",
+                    [
+                        {
+                            "slot": "constraints.max_price",
+                            "operation": "replace",
+                            "value": 450,
+                        }
+                    ],
+                )
+        ]
+    )
+
+    await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "预算改成 450 元",
+    )
+
+    candidates = harness.evidence.validate_calls[0][0]
+    retained = next(
+        candidate
+        for candidate in candidates
+        if candidate.product.product_id == "p1"
+    )
+    assert [chunk.chunk_id for chunk in retained.evidence] == [
+        f"p1:chunk:{index}" for index in range(6)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stable_refinement_recovers_from_retryable_exact_fetch_failure(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path, product_count=4, price_start=99)
+    stored = _conversation().model_copy(
+        update={"seen_product_ids": ["p1", "p2", "p3"]},
+        deep=True,
+    )
+    harness.retrieval.fetch_product_error = ServiceError(
+        "PRODUCT_KNOWLEDGE_UNAVAILABLE",
+        "product knowledge unavailable",
+        retryable=True,
+    )
+    repository = FakeConversationRepository(
+        ConversationRecord(state=stored, version=2)
+    )
+    parser = FakeTurnQueryParser(
+        [
+            _search_turn(
+                "refine_search",
+                [
+                    {
+                        "slot": "constraints.exclude_brands",
+                        "operation": "add",
+                        "value": "品牌 1",
+                    }
+                ],
+            )
+        ]
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(harness, parser, repository),
+        "不要品牌 1",
+    )
+
+    assert harness.retrieval.fetch_product_calls == ["p1", "p2", "p3"]
+    assert len(harness.retrieval.retrieve_calls) == 2
+    assert repository.record is not None
+    assert [
+        candidate.product_id
+        for candidate in repository.record.state.recent_candidates
+    ] == ["p2", "p3", "p4"]
+    assert [
+        part["data"]["data"]["product_id"]
+        for part in events
+        if part["data"]["event"] == "product"
+    ] == ["p2", "p3", "p4"]
 
 
 @pytest.mark.asyncio
@@ -2585,7 +2949,12 @@ async def test_more_results_excludes_all_seen_and_appends_exact_new_batch(
 
 
 @pytest.mark.parametrize(
-    ("turn_payload", "expected_terms", "expected_max_price"),
+    (
+        "turn_payload",
+        "expected_terms",
+        "expected_max_price",
+        "expected_exclusions",
+    ),
     [
         (
             {
@@ -2595,6 +2964,7 @@ async def test_more_results_excludes_all_seen_and_appends_exact_new_batch(
             },
             ["通勤", "轻量"],
             500,
+            (),
         ),
         (
             {
@@ -2608,11 +2978,13 @@ async def test_more_results_excludes_all_seen_and_appends_exact_new_batch(
             },
             ["通勤"],
             300,
+            ("p-old", "p1", "p2", "p3"),
         ),
         (
             {"relative_price": "cheaper"},
             ["通勤"],
             399.99,
+            ("p-old", "p1", "p2", "p3"),
         ),
     ],
 )
@@ -2622,8 +2994,10 @@ async def test_more_results_with_query_mutation_refines_from_full_catalog(
     turn_payload: dict[str, object],
     expected_terms: list[str],
     expected_max_price: float,
+    expected_exclusions: tuple[str, ...],
 ) -> None:
     harness = build_harness(tmp_path, price_start=99)
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
     repository = FakeConversationRepository(
         ConversationRecord(state=_conversation(), version=4)
     )
@@ -2645,21 +3019,27 @@ async def test_more_results_with_query_mutation_refines_from_full_catalog(
     )
 
     call = harness.retrieval.retrieve_calls[0]
-    assert call.excluded_product_ids == ()
+    assert call.excluded_product_ids == expected_exclusions
     assert call.intent.constraints.max_price == expected_max_price
     assert repository.record is not None
     snapshot = repository.record.state.query_snapshot
     assert snapshot is not None
     assert snapshot.semantic_terms == expected_terms
     assert snapshot.constraints.max_price == expected_max_price
-    assert repository.record.state.seen_product_ids == ["p1", "p2", "p3"]
+    assert repository.record.state.seen_product_ids == [
+        "p-old",
+        "p1",
+        "p2",
+        "p3",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_more_results_with_resolved_brand_refines_without_seen_exclusions(
+async def test_more_results_with_resolved_brand_uses_stable_hard_refinement(
     tmp_path: Path,
 ) -> None:
     harness = build_harness(tmp_path, price_start=99)
+    _seed_exact_product_chunks(harness, "p1", "p2", "p3")
     stored = _conversation(focus="p2")
     repository = FakeConversationRepository(
         ConversationRecord(state=stored, version=4)
@@ -2686,11 +3066,16 @@ async def test_more_results_with_resolved_brand_refines_without_seen_exclusions(
     )
 
     call = harness.retrieval.retrieve_calls[0]
-    assert call.excluded_product_ids == ()
+    assert call.excluded_product_ids == ("p-old", "p1", "p2", "p3")
     assert call.intent.constraints.include_brands == ["品牌 2"]
     assert repository.record is not None
     assert repository.record.state.focused_product_id is None
-    assert repository.record.state.seen_product_ids == ["p1", "p2", "p3"]
+    assert repository.record.state.seen_product_ids == [
+        "p-old",
+        "p1",
+        "p2",
+        "p3",
+    ]
 
 
 @pytest.mark.asyncio
@@ -3493,8 +3878,8 @@ async def test_product_question_clear_save_failure_emits_no_text(tmp_path: Path)
         (
             True,
             False,
-            "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
-            "建议您调整筛选条件。",
+            "当前没有找到同时满足全部筛选条件的商品，"
+            "建议您放宽或修改筛选条件。",
         ),
     ],
 )
@@ -3527,7 +3912,7 @@ async def test_no_result_paths_persist_before_text_and_clear_latest_focus(
     assert persisted.query_snapshot == _conversation().query_snapshot
     assert persisted.recent_candidates == []
     assert persisted.focused_product_id is None
-    assert persisted.seen_product_ids == []
+    assert persisted.seen_product_ids == ["p-old", "p1", "p2", "p3"]
     assert repository.trace == ["persist"]
     assert all(part["data"]["event"] != "product" for part in events)
     assert [part["data"]["event"] for part in events] == ["text_delta"]
@@ -3563,7 +3948,7 @@ async def test_failed_more_results_preserves_latest_reference_context(
 
 
 @pytest.mark.asyncio
-async def test_empty_final_selection_uses_insufficient_evidence_response(
+async def test_empty_final_selection_uses_condition_mismatch_response(
     tmp_path: Path,
 ) -> None:
     harness = build_harness(tmp_path)
@@ -3595,11 +3980,11 @@ async def test_empty_final_selection_uses_insufficient_evidence_response(
     )
 
     assert harness.evidence.validate_calls
-    assert harness.evidence.select_calls
+    assert harness.evidence.select_calls == []
     assert [part["data"]["event"] for part in events] == ["text_delta"]
     assert events[0]["data"]["data"]["delta"] == (
-        "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
-        "建议您调整筛选条件。"
+        "当前没有找到同时满足全部筛选条件的商品，"
+        "建议您放宽或修改筛选条件。"
     )
     assert harness.response.prompts == []
     assert repository.record is not None

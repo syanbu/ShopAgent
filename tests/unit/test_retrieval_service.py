@@ -233,6 +233,33 @@ def test_retrieval_groups_chunks_and_keeps_top_five_per_product(
     ]
 
 
+def test_aggregate_products_can_preserve_all_exact_product_evidence(
+    sample_dataset_root: Path,
+) -> None:
+    catalog = ProductCatalog.load(sample_dataset_root)
+    chunks = [
+        _chunk("p_digital_001", index, score)
+        for index, score in enumerate((0.20, 0.95, 0.60, 0.80, 0.50, 0.70))
+    ]
+    service, _, _, _ = _service(
+        settings=_settings(sample_dataset_root), catalog=catalog, chunks=[]
+    )
+
+    candidates = service.aggregate_products(
+        chunks,
+        max_evidence_chunks=None,
+    )
+
+    assert [chunk.score for chunk in candidates[0].evidence] == [
+        0.95,
+        0.80,
+        0.70,
+        0.60,
+        0.50,
+        0.20,
+    ]
+
+
 def test_aggregate_products_rejects_unknown_catalog_product(
     sample_dataset_root: Path,
 ) -> None:

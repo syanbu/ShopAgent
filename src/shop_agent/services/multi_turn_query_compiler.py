@@ -1,6 +1,7 @@
 """Pure compilation of one parsed turn into a complete search snapshot."""
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from math import isfinite
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -22,6 +23,7 @@ SearchIntent = Literal[
     "switch_category",
     "more_results",
 ]
+ResultStrategy = Literal["stable_refine", "full_rerank", "more_results"]
 
 MISSING_CONTEXT_MESSAGE = "请先说明想购买的商品类型，我才能继续细化或换一批。"
 INVALID_CONDITION_MESSAGE = "查询条件与当前商品目录不匹配，请调整后再试。"
@@ -34,6 +36,7 @@ class QueryMergeResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     intent: SearchIntent
+    result_strategy: ResultStrategy = "full_rerank"
     state: ConversationState
     snapshot: QuerySnapshot | None = None
     parsed_intent: ParsedIntent | None = None
@@ -81,6 +84,7 @@ def merge_turn_query(
         )
         snapshot = _compile_operations(operation_base, turn, catalog)
         snapshot = _apply_resolved_brand(snapshot, turn, resolved_brand)
+        snapshot = _apply_approximate_price(snapshot, turn)
         snapshot = _apply_relative_price(
             snapshot,
             turn,
@@ -104,9 +108,16 @@ def merge_turn_query(
             INVALID_CONDITION_MESSAGE,
         )
 
+    result_strategy = _result_strategy(
+        intent,
+        turn,
+        old_snapshot=state.query_snapshot,
+        new_snapshot=snapshot,
+    )
     next_state = _update_search_state(base_state, snapshot, intent)
     return QueryMergeResult(
         intent=intent,
+        result_strategy=result_strategy,
         state=next_state,
         snapshot=snapshot,
         parsed_intent=snapshot.to_parsed_intent(),
@@ -129,6 +140,7 @@ def _has_query_mutation(turn: TurnQuery, resolved_brand: str | None) -> bool:
         turn.semantic_term_operations
         or turn.slot_operations
         or turn.relative_price is not None
+        or turn.approximate_price is not None
         or resolved_brand is not None
     )
 
@@ -215,7 +227,12 @@ def _apply_semantic_operations(
             terms = []
             continue
         value = _non_blank_string(operation.value)
-        if operation.operation == "add":
+        if operation.operation == "prioritize":
+            terms = [
+                value,
+                *_stable_remove(terms, value),
+            ]
+        elif operation.operation == "add":
             terms = _stable_add(terms, value)
         else:
             terms = _stable_remove(terms, value)
@@ -465,6 +482,49 @@ def _apply_resolved_brand(
     return snapshot.model_copy(update={"constraints": constraints}, deep=True)
 
 
+def _apply_approximate_price(
+    snapshot: QuerySnapshot,
+    turn: TurnQuery,
+) -> QuerySnapshot:
+    approximate = turn.approximate_price
+    if approximate is None:
+        return snapshot.model_copy(deep=True)
+
+    amount = Decimal(str(approximate.amount))
+    tolerance_value = Decimal(str(approximate.tolerance_value))
+    integer_digits = max(
+        1,
+        amount.adjusted() + 1,
+        tolerance_value.adjusted() + 1,
+    )
+    try:
+        with localcontext() as context:
+            context.prec = max(28, integer_digits + 8)
+            tolerance = tolerance_value
+            if approximate.tolerance_kind == "percent":
+                tolerance = amount * tolerance / Decimal("100")
+            lower = max(Decimal("0"), amount - tolerance).quantize(
+                _PRICE_STEP,
+                rounding=ROUND_HALF_UP,
+            )
+            upper = (amount + tolerance).quantize(
+                _PRICE_STEP,
+                rounding=ROUND_HALF_UP,
+            )
+    except InvalidOperation as error:
+        raise _ClarificationNeeded(INVALID_CONDITION_MESSAGE) from error
+    lower_value = float(lower)
+    upper_value = float(upper)
+    if not isfinite(lower_value) or not isfinite(upper_value):
+        raise _ClarificationNeeded(INVALID_CONDITION_MESSAGE)
+    updates: dict[str, float | None] = {
+        "min_price": lower_value if approximate.mode == "target" else None,
+        "max_price": upper_value,
+    }
+    constraints = snapshot.constraints.model_copy(update=updates, deep=True)
+    return snapshot.model_copy(update={"constraints": constraints}, deep=True)
+
+
 def _apply_relative_price(
     snapshot: QuerySnapshot,
     turn: TurnQuery,
@@ -548,9 +608,12 @@ def _update_search_state(
     snapshot: QuerySnapshot,
     intent: SearchIntent,
 ) -> ConversationState:
-    if intent == "more_results":
+    if intent not in {"new_search", "switch_category"}:
         return state.model_copy(
-            update={"query_snapshot": snapshot.model_copy(deep=True)},
+            update={
+                "query_snapshot": snapshot.model_copy(deep=True),
+                "pending_clarification": None,
+            },
             deep=True,
         )
     return state.model_copy(
@@ -563,6 +626,131 @@ def _update_search_state(
         },
         deep=True,
     )
+
+
+def _result_strategy(
+    intent: SearchIntent,
+    turn: TurnQuery,
+    *,
+    old_snapshot: QuerySnapshot | None,
+    new_snapshot: QuerySnapshot,
+) -> ResultStrategy:
+    if intent == "more_results":
+        return "more_results"
+    if intent in {"new_search", "switch_category"} or old_snapshot is None:
+        return "full_rerank"
+    if _has_soft_mutation(turn):
+        return "full_rerank"
+    relation = _hard_constraint_relation(
+        old_snapshot.constraints,
+        new_snapshot.constraints,
+    )
+    return "stable_refine" if relation == {"tighten"} else "full_rerank"
+
+
+def _has_soft_mutation(turn: TurnQuery) -> bool:
+    return bool(
+        turn.semantic_term_operations
+        or any(
+            operation.slot == "constraints.price_preference"
+            for operation in turn.slot_operations
+        )
+    )
+
+
+def _hard_constraint_relation(
+    old: SearchConstraints,
+    new: SearchConstraints,
+) -> set[Literal["tighten", "relax"]]:
+    relation: set[Literal["tighten", "relax"]] = set()
+    relation.update(_lower_bound_relation(old.min_price, new.min_price))
+    relation.update(_upper_bound_relation(old.max_price, new.max_price))
+    relation.update(_allowed_values_relation(old.include_brands, new.include_brands))
+    relation.update(_excluded_values_relation(old.exclude_brands, new.exclude_brands))
+    relation.update(
+        _excluded_values_relation(old.required_features, new.required_features)
+    )
+    relation.update(
+        _excluded_values_relation(old.excluded_features, new.excluded_features)
+    )
+
+    sku_keys = set(old.sku_constraints).union(new.sku_constraints)
+    for key in sku_keys:
+        relation.update(
+            _allowed_values_relation(
+                old.sku_constraints.get(key, []),
+                new.sku_constraints.get(key, []),
+            )
+        )
+    relation.update(
+        _excluded_values_relation(
+            [item.condition_id() for item in old.numeric_constraints],
+            [item.condition_id() for item in new.numeric_constraints],
+        )
+    )
+    return relation
+
+
+def _lower_bound_relation(
+    old: float | None,
+    new: float | None,
+) -> set[Literal["tighten", "relax"]]:
+    if old == new:
+        return set()
+    if old is None:
+        return {"tighten"}
+    if new is None:
+        return {"relax"}
+    return {"tighten"} if new > old else {"relax"}
+
+
+def _upper_bound_relation(
+    old: float | None,
+    new: float | None,
+) -> set[Literal["tighten", "relax"]]:
+    if old == new:
+        return set()
+    if old is None:
+        return {"tighten"}
+    if new is None:
+        return {"relax"}
+    return {"tighten"} if new < old else {"relax"}
+
+
+def _allowed_values_relation(
+    old_values: list[str],
+    new_values: list[str],
+) -> set[Literal["tighten", "relax"]]:
+    old = set(old_values)
+    new = set(new_values)
+    if old == new:
+        return set()
+    if not old:
+        return {"tighten"}
+    if not new:
+        return {"relax"}
+    relation: set[Literal["tighten", "relax"]] = set()
+    if not new.issuperset(old):
+        relation.add("tighten")
+    if not new.issubset(old):
+        relation.add("relax")
+    return relation
+
+
+def _excluded_values_relation(
+    old_values: list[str],
+    new_values: list[str],
+) -> set[Literal["tighten", "relax"]]:
+    old = set(old_values)
+    new = set(new_values)
+    if old == new:
+        return set()
+    relation: set[Literal["tighten", "relax"]] = set()
+    if not new.issubset(old):
+        relation.add("tighten")
+    if not new.issuperset(old):
+        relation.add("relax")
+    return relation
 
 
 def _validated_snapshot(

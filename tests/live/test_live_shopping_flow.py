@@ -94,10 +94,16 @@ class InstrumentedRetrievalService:
         return await self.delegate.fetch_product_chunks(product_id)
 
     def aggregate_products(
-        self, chunks: Sequence[RetrievedChunk]
+        self,
+        chunks: Sequence[RetrievedChunk],
+        *,
+        max_evidence_chunks: int | None = 5,
     ) -> list[ProductCandidate]:
         self.aggregate_calls += 1
-        return self.delegate.aggregate_products(chunks)
+        return self.delegate.aggregate_products(
+            chunks,
+            max_evidence_chunks=max_evidence_chunks,
+        )
 
     async def rerank_candidates(
         self, query: str, candidates: Sequence[ProductCandidate]

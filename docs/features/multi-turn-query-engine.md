@@ -1,6 +1,8 @@
-# 多轮 Query 编译与指代消解
+# 多轮 Query 编译、稳定条件细化与指代消解
 
-> 状态：开发中
+> 状态：已完成（开发）
+>
+> 生产上线验收：待完成真实模型 taxonomy 稳定性门槛；本状态不表示已经生产上线
 >
 > 代码入口：`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/services/ports.py`、`src/shop_agent/services/conversation_repository.py`、`src/shop_agent/services/reference_resolver.py`、`src/shop_agent/services/multi_turn_query_compiler.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/retrieval.py`、`src/shop_agent/services/qdrant_store.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py`、`src/shop_agent/api/dependencies.py`、`tests/unit/test_model_gateways.py`、`tests/unit/test_reference_resolver.py`、`tests/unit/test_multi_turn_workflow.py`、`tests/integration/test_chat_api.py`
 
@@ -28,7 +30,10 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 - 指代歧义、条件冲突和缺少上下文时的可续接澄清。
 - 新搜索、条件细化、品类切换、换一批、商品追问、澄清回答和非购物路由。
 - “再便宜一点”“贵一点”等相对价格操作。
-- 当前查询范围内的已展示商品去重。
+- “5000 左右”“预算大概 5000”等可确定编译的近似价格。
+- 硬约束收紧时保留仍合格商品并只用任务内未展示商品补位。
+- 软偏好有序累积、优先级调整与全量重排。
+- 当前购物任务内的已展示商品去重。
 - 按 `product_id` 读取 Qdrant 商品知识。
 - 会话乐观并发控制和确定性单元、工作流、SQLite、API 测试。
 
@@ -41,7 +46,8 @@ Qdrant 读取该商品的文本知识，不重新执行全库商品搜索。
 - MySQL 会话仓库实现；接口边界允许后续替换。
 - 商品数据热更新、商品 ID 失效处理和会话状态迁移器。
 - 图片指代、多模态输入、商品对比、购物车和交易操作。
-- 任意比例的模糊降价策略；相对价格只使用明确的历史价格基准。
+- 从自然语言自行猜测近似价格容差；默认容差固定为 10%，仅由用户明确金额或比例覆盖。
+- 任意比例的相对降价策略；相对价格只使用明确的历史价格基准。
 
 本功能依赖 [单轮文本商品推荐工作流](text-shopping-workflow.md) 的检索、重排、证据
 校验和 SSE 链路，以及 [跨品类商品约束与 SKU 匹配](cross-category-shopping-constraints.md)
@@ -144,17 +150,30 @@ categoryless 的旧快照不自动迁移，因为仅凭 `semantic_terms` 无法�
 
 ### 条件细化与换一批
 
-条件细化在完整商品库上重新检索，不能只过滤上一次展示的三个商品。条件变化后清空
-旧的已展示集合。
+条件细化始终以完整商品库为补位范围，不能只过滤上一次展示的三个商品。编译器比较
+新旧快照并确定结果策略：
 
-`recent_candidates` 只保存最近一批商品，服务于指代；`seen_product_ids` 累积当前
-查询条件下已经展示的商品，只服务于“还有吗”“换一批”的排重。连续换一批时排除
-全部 `seen_product_ids`，但用户不能通过序数引用更早批次的商品。
+- 仅收紧硬约束时使用 `stable_refine`。上一轮仍满足当前全部条件的商品保留原相对
+  顺序；不合格商品移除；空位按当前重排结果只使用本购物任务从未展示的商品补齐。
+- 放宽或取消硬约束时使用 `full_rerank`，所有当前合格商品重新竞争排序。
+- 增加、删除或调整软偏好优先级时使用 `full_rerank`。若同轮既改硬约束又改软偏好，
+  先应用硬过滤，再按新偏好全量重排。
+- 补位库存不足时允许少于三款，不用更早展示过的商品强行凑数。每次成功细化仍重新
+  发送当前完整商品卡片列表，不添加“保留”或“新推荐”标签。
 
-只有不含任何 query mutation 的纯 `more_results` 保持快照并携带 seen 排除。若同轮
-还包含语义词、槽位/价格、相对价格或解析出的品牌变化，则确定性转为
-`refine_search`（品类变化仍优先成为 `switch_category`），应用操作、清空旧 seen，
-并从全库重新检索，不能静默丢弃已经抽取的条件。
+“不要”“只要”“必须”“以内”“至少”等明确限制语气才生成品牌、feature、SKU 或
+价格硬约束；没有限制语气的普通描述默认作为软偏好。软偏好按
+`semantic_terms` 顺序累积，`prioritize` 将已有偏好移到首位且不重复。
+
+`recent_candidates` 只保存最近一批商品并限定指代范围；`seen_product_ids` 累积同一
+购物任务内所有已展示商品，只用于补位和“换一批”排重。细化成功或失败都不清空任务
+级 seen；新搜索或品类切换才重置任务历史。连续换一批排除全部 seen，但用户仍不能
+通过序数引用更早批次的商品。
+
+只有不含任何 query mutation 的纯 `more_results` 保持换批策略。若同轮还包含语义词、
+槽位/价格、近似价格、相对价格或解析出的品牌变化，则确定性转为
+`refine_search`（品类变化仍优先成为 `switch_category`），不能静默丢弃已经抽取的
+条件。
 
 ### 无结果与结果耗尽
 
@@ -163,14 +182,19 @@ categoryless 的旧快照不自动迁移，因为仅凭 `semantic_terms` 无法�
 - 纯 `more_results` 没有新商品时返回“当前条件下没有更多符合要求的商品了。”
 - 新搜索、条件细化或品类切换零召回时返回“当前筛选条件下没有找到匹配商品，建议您
   放宽或修改筛选条件。”
-- 有召回但证据校验或最终 SKU 选择没有可展示商品时返回“找到了一些候选商品，但现有
-  信息不足以确认它们符合要求，建议您调整筛选条件。”
+- 有召回但证据校验或最终 SKU 选择没有可展示商品时返回“当前没有找到同时满足全部
+  筛选条件的商品，建议您放宽或修改筛选条件。”该文案不把价格、品牌或 SKU
+  不匹配误报为商品资料不足。
 
 内部 `no_result_reason` 只存在于单次 `ShoppingState`，不进入 SQLite 或 SSE 数据。
 所有无结果分支先执行 `persist_no_results`，保存成功后才发送一个固定
 `text_delta`。失败的纯 `more_results` 保留 `seen_product_ids`、`recent_candidates`
 和 `focused_product_id`；因为本轮没有展示新商品，上一批仍是最近可指代的商品批次。
-新搜索、条件细化和品类切换无结果时继续清空这些旧展示状态。
+新搜索和品类切换无结果时清空旧展示状态。条件细化无结果时清空最新候选与焦点，但
+保留任务级 `seen_product_ids`，避免后续补位重复展示历史商品。
+
+细化有结果时，回答模型先简短确认已应用本轮筛选或偏好变化。若本轮选出的商品少于
+配置的展示上限，提示词要求如实说明本轮展示数量，但不能据此声称全库只有这些商品。
 
 ### 相对价格
 
@@ -183,6 +207,14 @@ categoryless 的旧快照不自动迁移，因为仅凭 `semantic_terms` 无法�
   “更贵”编译为基准价加 `0.01` 的包含下限，不使用任意百分比。例如最近价格为
   `[399, 459, 529]` 且没有焦点时，“更贵”的最低价是 `529.01`。早期实现计划中的
   `530.01` 是算术笔误；目录和候选中没有 `530.00` 的已确认基准。
+
+### 近似价格
+
+- “5000 左右”按目标价处理，默认上下浮动 10%，确定性编译为 `4500..5500`。
+- “预算大概 5000”按弹性预算上限处理，只生成 `max_price=5500`，不生成最低价。
+- 用户明确“上下 300”或“上下 5%”时覆盖默认 10%。
+- 严格的“5000 以内”“至少 5000”仍生成精确上限或下限。
+- 近似价格不能与同轮直接价格边界或相对价格并存；非法结构化输出进入既有纠正链路。
 
 ### 指定商品问答
 
@@ -258,14 +290,14 @@ categoryless 的旧快照不自动迁移，因为仅凭 `semantic_terms` 无法�
 - `non_shopping`
 
 槽位操作为 `replace`、`add`、`remove` 和 `clear`。预算等标量只接受
-`replace/clear`；品牌、语义词和 feature 列表接受 `add/remove/clear`。同一标量一轮
-最多一个最终操作，`clear` 不能与同槽位其他操作并存。
+`replace/clear`；品牌和 feature 列表接受 `add/remove/clear`，语义词额外接受
+`prioritize`。同一标量一轮最多一个最终操作，`clear` 不能与同槽位其他操作并存。
 
 最终模型术语为：
 
 ```text
 SemanticTermOperation
-  operation: "add" | "remove" | "clear"
+  operation: "add" | "remove" | "prioritize" | "clear"
   value: str | null
 
 SlotOperation
@@ -280,11 +312,29 @@ SlotOperation
   sku_key: CanonicalSkuKey | null
 ```
 
-语义词 `add/remove` 的 `value` 会先去除首尾空白并且必须非空，`clear` 不带值。`category`、
-`sub_category`、价格边界与 `price_preference` 只接受 `replace/clear`；品牌和 feature
-列表只接受 `add/remove/clear`。SKU 操作使用 `sku_key` 指定一个规范属性，离散值只在
+语义词 `add/remove/prioritize` 的 `value` 会先去除首尾空白并且必须非空，`clear`
+不带值；`prioritize` 将该词移到列表首位且不产生重复项。`category`、`sub_category`、
+价格边界与 `price_preference` 只接受 `replace/clear`；品牌和 feature 列表只接受
+`add/remove/clear`。SKU 操作使用 `sku_key` 指定一个规范属性，离散值只在
 `add/remove` 时提供；`clear` 清空该 key。数值条件的 `add/remove` 携带完整
 `NumericConstraint`，`clear` 不带值并清空整个数值条件列表。
+
+近似价格使用独立字段，避免模型直接计算上下界：
+
+```json
+{
+  "approximate_price": {
+    "mode": "target",
+    "amount": 5000,
+    "tolerance_kind": "percent",
+    "tolerance_value": 10
+  }
+}
+```
+
+`mode` 为 `target` 或 `budget_cap`；容差类型为 `percent` 或 `absolute`。未明确容差
+时使用百分比 10。金额和容差必须是有限数值；该字段与 `relative_price`、同轮
+`min_price/max_price` 操作互斥。
 
 `constraints.price_preference` 的 `replace` 值只允许精确字符串 `"value"`，含义仅为
 性价比偏好。`SlotOperation` 在 Pydantic 模型边界拒绝 `most_expensive`、`cheapest`
@@ -417,7 +467,11 @@ payload Filter 和 scroll 读取全部 Chunk，不请求向量。返回独立的
 
 普通检索接口增加请求级 `excluded_product_ids`，使用 `product_id` 的 `must_not`
 过滤实现换一批排重。该列表不写入 `SearchConstraints`，避免把展示历史误当成用户
-商品约束。
+商品约束。稳定细化时，全库检索同样排除任务级 seen，同时按 `product_id` 精确读取
+最近候选的全部 Chunk 并注入同一聚合、重排和证据校验链路；历史保留项不使用普通
+召回“每商品最多 5 条证据”的截断，以免漏掉决定硬约束是否成立的后置证据。若派生
+索引缺少精确 Chunk，或精确读取发生可重试的服务故障，允许用一次普通召回仅补回
+缺失的最近候选证据；不可重试的数据错误仍失败关闭。
 
 ## 工作流
 
@@ -460,8 +514,13 @@ START
 - 加入必需 feature 时移除相同的排除 feature，反之亦然。
 - 明确金额覆盖相对价格操作。
 - 合并后 `min_price > max_price` 时进入业务澄清，不将其作为模型或服务错误。
-- 条件修改后清空 `seen_product_ids`；连续换一批时累积它。
+- 纯硬约束收紧选择稳定细化；硬约束放宽、软偏好变化或混合变化选择全量重排。
+- 同一购物任务的细化和换一批持续累积 `seen_product_ids`；新搜索和品类切换清空。
 - 非购物输入不修改现有购物快照。
+
+最终商品卡片仍沿用 SKU 级约束语义：只要至少一个 SKU 同时满足当前全部硬条件，商品
+即可保留；卡片只发送这些匹配 SKU，`display_price` 取匹配 SKU 的最低价格。若所有
+SKU 都不满足，整个商品才被移除。
 
 ## 错误与一致性
 
@@ -490,6 +549,10 @@ TurnQuery 的 taxonomy 后校验同时覆盖槽位品牌和
 重复、顺序错误或与直接品类槽位冲突时纠正一次。品类候选列表的语言完整性由真实模型
 验收约束；“耳机”“手机”“鞋”“T恤”分别重复五次，任何一次遗漏都必须将实现升级为
 完整 taxonomy 匹配矩阵，不能以不完整候选列表上线。
+
+上述 20 次真实模型稳定性验证是生产上线门槛，不是确定性代码开发完成条件。功能只有
+在单元、工作流、集成和静态检查全部通过后才可标记“开发完成”；在 20 次真实模型验证
+未完成或未通过时，仍不得标记为“生产上线验收通过”。
 
 搜索结果由 `persist_search_result` 保存后才发送 `product` 和推荐文本；零结果由
 `persist_no_results` 保存后才发送固定文本，且不调用回答模型；商品追问由
@@ -572,7 +635,7 @@ TurnQuery 的 taxonomy 后校验同时覆盖槽位品牌和
 | 标量、列表、SKU、数值和语义操作 | `tests/unit/test_multi_turn_query_compiler.py::test_refinement_replaces_budget_and_preserves_unrelated_slot`、`test_brand_and_feature_slots_support_remove_and_clear`、`test_sku_operations_are_stable_and_copy_on_write`、`test_numeric_operations_are_stable_and_copy_on_write`、`test_semantic_terms_add_and_remove_in_stable_order`；`tests/unit/test_turn_query_models.py::test_semantic_term_add_and_remove_reject_blank_values` |
 | 相对价格基准与明确金额覆盖 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_relative_cheaper_uses_latest_minimum_minus_one_cent`、`test_missing_price_baseline_answer_preserves_existing_snapshot_and_retrieves`；`tests/unit/test_multi_turn_query_compiler.py::test_focus_price_is_the_cheaper_baseline`、`test_latest_batch_extreme_is_relative_price_baseline`、`test_explicit_applicable_boundary_overrides_relative_price` |
 | seen 累积、mutation 全库重检索且 ordinal 只看最新批 | `tests/unit/test_multi_turn_workflow.py::test_acceptance_more_batches_accumulate_seen_and_final_ordinal_targets_h`、`test_more_results_with_query_mutation_refines_from_full_catalog`；`tests/unit/test_multi_turn_query_compiler.py::test_more_results_with_price_operation_becomes_refinement`、`test_more_results_with_semantic_operation_becomes_refinement`、`test_more_results_with_relative_price_becomes_refinement` |
-| 无结果原因分类与固定文案 | `tests/unit/test_workflow_routes.py::test_no_hits_skips_rerank_validation_and_decision`、`test_evidence_empty_skips_candidate_decision`；`tests/unit/test_multi_turn_workflow.py::test_failed_more_results_preserves_latest_reference_context`、`test_empty_final_selection_uses_insufficient_evidence_response`、`test_more_results_with_only_ineligible_remaining_products_is_exhausted` |
+| 无结果原因分类与固定文案 | `tests/unit/test_workflow_routes.py::test_no_hits_skips_rerank_validation_and_decision`、`test_evidence_empty_skips_candidate_decision`；`tests/unit/test_multi_turn_workflow.py::test_failed_more_results_preserves_latest_reference_context`、`test_empty_final_selection_uses_condition_mismatch_response`、`test_more_results_with_only_ineligible_remaining_products_is_exhausted` |
 | 自然语言品类唯一绑定、歧义恢复、越界保护与目录不支持短路 | `tests/unit/test_model_gateways.py::test_turn_query_parser_accepts_grounded_exact_category_candidates`、`test_turn_query_parser_rejects_invalid_category_references_after_retry`；`tests/unit/test_reference_resolver.py::test_category_resolver_resolves_one_exact_catalog_scope`、`test_category_resolver_clarifies_all_multiple_catalog_scopes`；`tests/unit/test_multi_turn_workflow.py::test_unique_category_reference_retrieves_only_the_resolved_scope`、`test_category_clarification_resumes_suspended_budget`、`test_category_clarification_answer_cannot_escape_pending_scopes`、`test_explicit_unsupported_category_skips_retrieval` |
 | 结果耗尽的 HTTP/SSE 与持久化边界 | `tests/integration/test_chat_api.py::test_compiled_http_more_results_exhaustion_preserves_follow_up_reference`；`tests/unit/test_multi_turn_workflow.py::test_failed_more_results_preserves_latest_reference_context`、`test_no_result_paths_persist_before_text_and_clear_latest_focus` |
 | 无显式商品 reference 的焦点/单候选回退与多候选澄清 | `tests/unit/test_multi_turn_workflow.py::test_reference_less_product_question_uses_focused_product`、`test_reference_less_structured_question_uses_focused_product_skus`、`test_reference_less_product_question_uses_only_recent_candidate`、`test_reference_less_product_question_with_multiple_candidates_clarifies` |
@@ -585,6 +648,8 @@ TurnQuery 的 taxonomy 后校验同时覆盖槽位品牌和
 | SQLite 重建、隔离、版本冲突和错误归一化 | `tests/unit/test_conversation_repository.py::test_save_new_state_creates_parent_and_survives_repository_recreation`、`test_conversations_remain_isolated`、`test_stale_version_returns_retryable_conversation_conflict`、`test_invalid_persisted_state_is_normalized_without_content_leakage` |
 | 固定商品数据、无失效迁移、v1 无 Redis/MySQL | `tests/unit/test_conversation_repository.py::test_state_json_is_compact_domain_state_without_product_body` 固化只存 ID/领域状态的边界；固定数据和无 Redis/MySQL 是本文“范围”和“关键决策”的显式 v1 限制 |
 | HTTP/SSE 兼容及生成/保存失败顺序 | `tests/integration/test_chat_api.py::test_chat_stream_emits_start_products_text_and_end`、`test_generation_failure_after_products_is_partial`、`test_compiled_http_generation_failure_persists_candidates_for_follow_up_ordinal`、`test_compiled_graph_pre_product_errors_are_safe_over_http`；`tests/unit/test_multi_turn_workflow.py::test_persist_completes_before_first_product_and_exact_display_price_is_saved` |
+| 硬约束稳定保留、完整精确证据、可重试补证据、未展示补位、补位耗尽与任务级 seen | `tests/unit/test_multi_turn_workflow.py::test_hard_tightening_preserves_eligible_order_and_fills_with_unseen`、`test_hard_tightening_returns_fewer_cards_when_unseen_fill_is_exhausted`、`test_stable_refinement_keeps_full_unseen_pool_beyond_aggregate_limit`、`test_stable_refinement_validates_all_exact_evidence_chunks`、`test_stable_refinement_recovers_from_retryable_exact_fetch_failure`；`tests/unit/test_retrieval_service.py::test_aggregate_products_can_preserve_all_exact_product_evidence`；`tests/unit/test_multi_turn_query_compiler.py::test_hard_constraint_tightening_uses_stable_refinement`、`test_hard_constraint_relaxation_uses_full_rerank` |
+| 软偏好优先级与近似价格编译 | `tests/unit/test_multi_turn_query_compiler.py::test_soft_preference_prioritize_moves_term_to_front_and_uses_full_rerank`、`test_approximate_price_compiles_deterministic_bounds`、`test_large_finite_approximate_price_compiles_without_decimal_failure`、`test_approximate_price_overflow_becomes_safe_clarification`；`tests/unit/test_turn_query_models.py::test_approximate_price_accepts_default_and_explicit_tolerance`、`test_approximate_price_cannot_coexist_with_other_price_operations`、`test_approximate_price_rejects_non_finite_values` |
 
 ### Fresh 验证
 
@@ -671,10 +736,45 @@ env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q -p no:cacheprovider
 `p_digital_018`。最终回复马年特别款、MagSafe 充电盒、定制镌刻且含 AppleCare+ 的
 配置售价 2299 元，各轮均为 `status=completed`。临时客户端和 Uvicorn 服务随后退出。
 
+2026-07-30 稳定条件细化、软偏好优先级和近似价格接入后执行：
+
+```bash
+env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q -p no:cacheprovider
+# 484 passed, 21 skipped in 8.57s
+
+env -u ALL_PROXY -u all_proxy .venv/bin/ruff check .
+# All checks passed!
+
+env -u ALL_PROXY -u all_proxy .venv/bin/mypy src scripts
+# Success: no issues found in 39 source files
+```
+
+21 个跳过项仍全部是显式 opt-in 的 live 测试。本次没有修改依赖、数据库表、公开 SSE
+事件或商品卡片字段。
+
+2026-07-30 开发完成审查与边界加固后执行：
+
+```bash
+env -u ALL_PROXY -u all_proxy .venv/bin/pytest -q -p no:cacheprovider
+# 491 passed, 21 skipped in 8.48s
+
+env -u ALL_PROXY -u all_proxy .venv/bin/ruff check .
+# All checks passed!
+
+env -u ALL_PROXY -u all_proxy .venv/bin/mypy src scripts
+# Success: no issues found in 39 source files
+```
+
+本次开发完成标记覆盖确定性代码与测试。21 个 live 项仍为 opt-in，其中 20 个真实模型
+taxonomy 稳定性用例尚未完成，不据此声明生产上线验收通过。
+
 ## 变更记录
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
+| 2026-07-30 | 完成多轮 Query 开发审查，保留稳定细化历史项的全部精确证据，并为可重试精确读取故障增加普通召回补证据 | 防止证据截断误留不合格商品，同时避免派生索引暂时不可用导致整轮筛选失败 |
+| 2026-07-30 | 将候选全部被筛选条件淘汰时的固定文案改为“未找到同时满足全部筛选条件的商品” | 避免把价格、品牌或 SKU 不匹配错误描述为商品资料不足 |
+| 2026-07-30 | 增加硬约束稳定细化、任务级未展示补位、软偏好优先级与确定性近似价格 | 减少多轮筛选时无意义的商品跳变，同时确保放宽条件和偏好变化仍能全量重排，并避免用历史商品强行补足三款 |
 | 2026-07-29 | 将焦点商品“最贵/最便宜版本”追问固定为 SKU 问答，并在 Pydantic 边界限制价格偏好枚举 | 避免承接式商品追问被误判为全局价格筛选，也防止 `most_expensive` 等非法值进入 Query 编译 |
 | 2026-07-29 | 为商品问答补充目标标题并自然化回答提示词 | 避免“该商品的价格为 1099.0 元”和“根据已校验事实”等机械表达，同时保持价格快照、事实白名单、注入防护与流式边界 |
 | 2026-07-28 | 纯换一批耗尽时保留上一批候选与焦点 | 无商品返回的轮次不应覆盖最近展示批次，使用户仍可继续询问上一批商品 |

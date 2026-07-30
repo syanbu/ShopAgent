@@ -210,11 +210,23 @@ class DeterministicRetrievalService:
         )
 
     def aggregate_products(
-        self, chunks: Sequence[RetrievedChunk]
+        self,
+        chunks: Sequence[RetrievedChunk],
+        *,
+        max_evidence_chunks: int | None = 5,
     ) -> list[ProductCandidate]:
-        by_product = {chunk.product_id: chunk for chunk in chunks}
+        by_product: dict[str, list[RetrievedChunk]] = {}
+        for chunk in chunks:
+            by_product.setdefault(chunk.product_id, []).append(chunk)
         return [
-            ProductCandidate(product=product, evidence=[by_product[product.product_id]])
+            ProductCandidate(
+                product=product,
+                evidence=(
+                    by_product[product.product_id]
+                    if max_evidence_chunks is None
+                    else by_product[product.product_id][:max_evidence_chunks]
+                ),
+            )
             for product in self._catalog.all()
             if product.product_id in by_product
         ]
@@ -248,8 +260,48 @@ class DeterministicEvidenceService:
                     product_id=candidate.product.product_id,
                     checks=[],
                 ),
-                eligible=True,
-                rejection_reasons=[],
+                eligible=(
+                    (category is None or candidate.product.category == category)
+                    and (
+                        sub_category is None
+                        or candidate.product.sub_category == sub_category
+                    )
+                    and (
+                        not constraints.include_brands
+                        or candidate.product.brand in constraints.include_brands
+                    )
+                    and candidate.product.brand not in constraints.exclude_brands
+                    and bool(
+                        self._catalog.matched_skus(
+                            candidate.product.product_id,
+                            constraints,
+                        )
+                    )
+                ),
+                rejection_reasons=(
+                    []
+                    if (
+                        (category is None or candidate.product.category == category)
+                        and (
+                            sub_category is None
+                            or candidate.product.sub_category == sub_category
+                        )
+                        and (
+                            not constraints.include_brands
+                            or candidate.product.brand
+                            in constraints.include_brands
+                        )
+                        and candidate.product.brand
+                        not in constraints.exclude_brands
+                        and bool(
+                            self._catalog.matched_skus(
+                                candidate.product.product_id,
+                                constraints,
+                            )
+                        )
+                    )
+                    else ["structured_conditions_not_satisfied"]
+                ),
             )
             for candidate in candidates
         ]

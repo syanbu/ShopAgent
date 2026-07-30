@@ -131,8 +131,8 @@ async def test_evidence_empty_skips_candidate_decision(tmp_path: Path) -> None:
     assert harness.evidence.select_calls == []
     assert [part["data"]["event"] for part in events] == ["text_delta"]
     assert events[0]["data"]["data"]["delta"] == (
-        "找到了一些候选商品，但现有信息不足以确认它们符合要求，"
-        "建议您调整筛选条件。"
+        "当前没有找到同时满足全部筛选条件的商品，"
+        "建议您放宽或修改筛选条件。"
     )
     assert harness.response.prompts == []
 

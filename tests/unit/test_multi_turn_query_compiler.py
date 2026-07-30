@@ -15,7 +15,10 @@ from shop_agent.models.turn_query import (
     CategoryReference,
     TurnQuery,
 )
-from shop_agent.services.multi_turn_query_compiler import merge_turn_query
+from shop_agent.services.multi_turn_query_compiler import (
+    INVALID_CONDITION_MESSAGE,
+    merge_turn_query,
+)
 
 
 def _product(
@@ -179,9 +182,10 @@ def test_refinement_replaces_budget_and_preserves_unrelated_slot(
     assert result.snapshot.constraints.max_price == 300
     assert result.snapshot.constraints.required_features == ["佩戴舒适"]
     assert result.snapshot.semantic_terms == ["通勤"]
-    assert result.state.recent_candidates == []
-    assert result.state.focused_product_id is None
-    assert result.state.seen_product_ids == []
+    assert result.result_strategy == "stable_refine"
+    assert result.state.recent_candidates == state.recent_candidates
+    assert result.state.focused_product_id == state.focused_product_id
+    assert result.state.seen_product_ids == state.seen_product_ids
     _assert_input_unchanged(state, before)
 
 
@@ -1049,10 +1053,11 @@ def test_more_results_with_semantic_operation_becomes_refinement(
     )
 
     assert result.intent == "refine_search"
+    assert result.result_strategy == "full_rerank"
     assert result.snapshot is not None
     assert result.snapshot.semantic_terms == ["通勤", "拍照"]
-    assert result.state.recent_candidates == []
-    assert result.state.seen_product_ids == []
+    assert result.state.recent_candidates == state.recent_candidates
+    assert result.state.seen_product_ids == state.seen_product_ids
 
 
 def test_more_results_with_relative_price_becomes_refinement(
@@ -1073,10 +1078,11 @@ def test_more_results_with_relative_price_becomes_refinement(
     )
 
     assert result.intent == "refine_search"
+    assert result.result_strategy == "stable_refine"
     assert result.snapshot is not None
     assert result.snapshot.constraints.max_price == 458.99
-    assert result.state.recent_candidates == []
-    assert result.state.seen_product_ids == []
+    assert result.state.recent_candidates == state.recent_candidates
+    assert result.state.seen_product_ids == state.seen_product_ids
 
 
 def test_resolved_brand_is_included_and_removed_from_exclusions(
@@ -1104,7 +1110,7 @@ def test_resolved_brand_is_included_and_removed_from_exclusions(
     _assert_input_unchanged(state, before)
 
 
-def test_more_results_with_resolved_brand_becomes_refine_and_clears_batch_state(
+def test_more_results_with_resolved_brand_becomes_full_rerank_refinement(
     catalog: ProductCatalog,
 ) -> None:
     state = _state(
@@ -1129,12 +1135,13 @@ def test_more_results_with_resolved_brand_becomes_refine_and_clears_batch_state(
     )
 
     assert result.intent == "refine_search"
+    assert result.result_strategy == "full_rerank"
     assert result.snapshot is not None
     assert result.snapshot.constraints.include_brands == ["小米"]
     assert result.snapshot.constraints.exclude_brands == []
-    assert result.state.recent_candidates == []
-    assert result.state.focused_product_id is None
-    assert result.state.seen_product_ids == []
+    assert result.state.recent_candidates == state.recent_candidates
+    assert result.state.focused_product_id == state.focused_product_id
+    assert result.state.seen_product_ids == state.seen_product_ids
     _assert_input_unchanged(state, before)
 
 
@@ -1284,3 +1291,215 @@ def test_switch_validates_sku_operation_against_new_pair_after_resetting_old_slo
     assert result.state.recent_candidates == []
     assert result.state.seen_product_ids == []
     _assert_input_unchanged(state, before)
+
+
+def test_hard_constraint_tightening_uses_stable_refinement_and_keeps_batch_context(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(category="数码电子", sub_category="智能手机"),
+        recent=[
+            _candidate("phone-xiaomi-512", 1, 459),
+            _candidate("phone-xiaomi-1tb", 2, 529),
+        ],
+    )
+    before = state.model_copy(deep=True)
+
+    result = merge_turn_query(
+        _turn(
+            slot_operations=[
+                {
+                    "slot": "constraints.exclude_brands",
+                    "operation": "add",
+                    "value": "小米",
+                }
+            ]
+        ),
+        state,
+        catalog,
+    )
+
+    assert result.result_strategy == "stable_refine"
+    assert result.state.recent_candidates == state.recent_candidates
+    assert result.state.seen_product_ids == state.seen_product_ids
+    _assert_input_unchanged(state, before)
+
+
+def test_hard_constraint_relaxation_uses_full_rerank(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(
+            category="数码电子",
+            sub_category="智能手机",
+            constraints=SearchConstraints(exclude_brands=["小米"]),
+        ),
+        recent=[_candidate("phone-xiaomi-512", 1, 459)],
+    )
+
+    result = merge_turn_query(
+        _turn(
+            slot_operations=[
+                {
+                    "slot": "constraints.exclude_brands",
+                    "operation": "remove",
+                    "value": "小米",
+                }
+            ]
+        ),
+        state,
+        catalog,
+    )
+
+    assert result.result_strategy == "full_rerank"
+    assert result.snapshot is not None
+    assert result.snapshot.constraints.exclude_brands == []
+
+
+def test_soft_preference_prioritize_moves_term_to_front_and_uses_full_rerank(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(
+            category="数码电子",
+            sub_category="智能手机",
+            semantic_terms=["拍照", "轻薄"],
+        )
+    )
+
+    result = merge_turn_query(
+        _turn(
+            semantic_term_operations=[
+                {"operation": "prioritize", "value": "轻薄"}
+            ]
+        ),
+        state,
+        catalog,
+    )
+
+    assert result.result_strategy == "full_rerank"
+    assert result.snapshot is not None
+    assert result.snapshot.semantic_terms == ["轻薄", "拍照"]
+
+
+@pytest.mark.parametrize(
+    ("approximate_price", "expected_min", "expected_max"),
+    [
+        (
+            {"mode": "target", "amount": 5000},
+            4500,
+            5500,
+        ),
+        (
+            {"mode": "budget_cap", "amount": 5000},
+            None,
+            5500,
+        ),
+        (
+            {
+                "mode": "target",
+                "amount": 5000,
+                "tolerance_kind": "absolute",
+                "tolerance_value": 300,
+            },
+            4700,
+            5300,
+        ),
+    ],
+)
+def test_approximate_price_compiles_deterministic_bounds(
+    catalog: ProductCatalog,
+    approximate_price: dict[str, object],
+    expected_min: float | None,
+    expected_max: float,
+) -> None:
+    state = _state(
+        QuerySnapshot(category="数码电子", sub_category="智能手机")
+    )
+
+    result = merge_turn_query(
+        _turn(approximate_price=approximate_price),
+        state,
+        catalog,
+    )
+
+    assert result.result_strategy == "stable_refine"
+    assert result.snapshot is not None
+    assert result.snapshot.constraints.min_price == expected_min
+    assert result.snapshot.constraints.max_price == expected_max
+
+
+def test_more_results_with_approximate_price_becomes_refinement(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(category="数码电子", sub_category="智能手机")
+    )
+
+    result = merge_turn_query(
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "more_results",
+                "approximate_price": {
+                    "mode": "budget_cap",
+                    "amount": 5000,
+                },
+            }
+        ),
+        state,
+        catalog,
+    )
+
+    assert result.intent == "refine_search"
+    assert result.result_strategy == "stable_refine"
+    assert result.snapshot is not None
+    assert result.snapshot.constraints.max_price == 5500
+
+
+def test_large_finite_approximate_price_compiles_without_decimal_failure(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(category="数码电子", sub_category="智能手机")
+    )
+
+    result = merge_turn_query(
+        _turn(
+            approximate_price={
+                "mode": "target",
+                "amount": 1e29,
+            }
+        ),
+        state,
+        catalog,
+    )
+
+    assert result.needs_clarification is False
+    assert result.snapshot is not None
+    assert result.snapshot.constraints.min_price == 9e28
+    assert result.snapshot.constraints.max_price == 1.1e29
+
+
+def test_approximate_price_overflow_becomes_safe_clarification(
+    catalog: ProductCatalog,
+) -> None:
+    state = _state(
+        QuerySnapshot(category="数码电子", sub_category="智能手机")
+    )
+
+    result = merge_turn_query(
+        _turn(
+            approximate_price={
+                "mode": "target",
+                "amount": 1e308,
+                "tolerance_kind": "absolute",
+                "tolerance_value": 1e308,
+            }
+        ),
+        state,
+        catalog,
+    )
+
+    assert result.needs_clarification is True
+    assert result.clarification_message == INVALID_CONDITION_MESSAGE

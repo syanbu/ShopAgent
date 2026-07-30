@@ -19,6 +19,8 @@ TurnIntent = Literal[
 ReferenceTarget = Literal["product", "brand"]
 ReferenceKind = Literal["ordinal", "demonstrative", "brand", "product_name"]
 RelativePriceDirection = Literal["cheaper", "more_expensive"]
+ApproximatePriceMode = Literal["target", "budget_cap"]
+PriceToleranceKind = Literal["percent", "absolute"]
 StructuredFactField = Literal["title", "brand", "category", "display_price", "sku"]
 SlotOperationKind = Literal["replace", "add", "remove", "clear"]
 SlotName = Literal[
@@ -159,10 +161,25 @@ class ProductQuestion(BaseModel):
         return self
 
 
+class ApproximatePrice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ApproximatePriceMode
+    amount: float = Field(ge=0, allow_inf_nan=False)
+    tolerance_kind: PriceToleranceKind = "percent"
+    tolerance_value: float = Field(default=10, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_tolerance(self) -> "ApproximatePrice":
+        if self.tolerance_kind == "percent" and self.tolerance_value >= 100:
+            raise ValueError("percentage tolerance must be less than 100")
+        return self
+
+
 class SemanticTermOperation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    operation: Literal["add", "remove", "clear"]
+    operation: Literal["add", "remove", "clear", "prioritize"]
     value: str | None = None
 
     @field_validator("value")
@@ -175,7 +192,9 @@ class SemanticTermOperation(BaseModel):
         if self.operation == "clear" and self.value is not None:
             raise ValueError("clear semantic operations cannot include a value")
         if self.operation != "clear" and not self.value:
-            raise ValueError("semantic add and remove operations require a value")
+            raise ValueError(
+                "semantic add, remove, and prioritize operations require a value"
+            )
         return self
 
 
@@ -234,6 +253,7 @@ class TurnQuery(BaseModel):
     category_reference: CategoryReference | None = None
     semantic_term_operations: list[SemanticTermOperation] = Field(default_factory=list)
     slot_operations: list[SlotOperation] = Field(default_factory=list)
+    approximate_price: ApproximatePrice | None = None
     relative_price: RelativePriceDirection | None = None
     product_question: ProductQuestion | None = None
     cancel_pending: bool = False
@@ -249,6 +269,19 @@ class TurnQuery(BaseModel):
             raise ValueError(
                 "category_reference cannot coexist with direct category slots"
             )
+        if self.approximate_price is not None:
+            if self.relative_price is not None:
+                raise ValueError(
+                    "approximate_price cannot coexist with relative_price"
+                )
+            if any(
+                operation.slot
+                in {"constraints.min_price", "constraints.max_price"}
+                for operation in self.slot_operations
+            ):
+                raise ValueError(
+                    "approximate_price cannot coexist with direct price operations"
+                )
 
         scalar_slots: set[str] = set()
         cleared_collection_slots: set[str] = set()
