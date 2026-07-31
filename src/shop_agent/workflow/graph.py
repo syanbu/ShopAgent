@@ -7,6 +7,7 @@ from shop_agent.workflow.nodes import (
     build_nodes,
     route_compilation,
     route_category_resolution,
+    route_comparison_resolution,
     route_pending_action,
     route_product_question,
     route_reference_resolution,
@@ -30,6 +31,23 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         nodes.resolve_category_reference,
     )
     builder.add_node("persist_clarification", nodes.persist_clarification)
+    builder.add_node(
+        "resolve_comparison_targets",
+        nodes.resolve_comparison_targets,
+    )
+    builder.add_node(
+        "load_comparison_materials",
+        nodes.load_comparison_materials,
+    )
+    builder.add_node("assess_comparison", nodes.assess_comparison)
+    builder.add_node(
+        "persist_comparison_focus",
+        nodes.persist_comparison_focus,
+    )
+    builder.add_node(
+        "emit_comparison_response",
+        nodes.emit_comparison_response,
+    )
     builder.add_node("merge_query_snapshot", nodes.merge_query_snapshot)
     builder.add_node("compile_effective_query", nodes.compile_effective_query)
     builder.add_node("retrieve_chunks", nodes.retrieve_chunks)
@@ -85,10 +103,23 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         {
             "search": "merge_query_snapshot",
             "product_question": "load_product_facts",
+            "product_comparison": "resolve_comparison_targets",
             "clarification_answer": "generate_response",
             "non_shopping": "generate_response",
         },
     )
+    builder.add_conditional_edges(
+        "resolve_comparison_targets",
+        route_comparison_resolution,
+        {
+            "resolved": "load_comparison_materials",
+            "needs_clarification": "persist_clarification",
+        },
+    )
+    builder.add_edge("load_comparison_materials", "assess_comparison")
+    builder.add_edge("assess_comparison", "persist_comparison_focus")
+    builder.add_edge("persist_comparison_focus", "emit_comparison_response")
+    builder.add_edge("emit_comparison_response", END)
     builder.add_conditional_edges(
         "merge_query_snapshot",
         route_compilation,

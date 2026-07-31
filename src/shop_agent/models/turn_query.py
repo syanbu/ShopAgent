@@ -13,6 +13,7 @@ TurnIntent = Literal[
     "switch_category",
     "more_results",
     "product_question",
+    "product_comparison",
     "clarification_answer",
     "non_shopping",
 ]
@@ -161,6 +162,59 @@ class ProductQuestion(BaseModel):
         return self
 
 
+class ComparisonCandidateMatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product_id: str = Field(min_length=1)
+    selected: bool
+
+    @field_validator("product_id", mode="before")
+    @classmethod
+    def normalize_product_id(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("comparison candidate product IDs must be strings")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("comparison candidate product IDs cannot be blank")
+        return normalized
+
+
+class ProductComparison(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1)
+    dimension: str | None = None
+    surface_text: str | None = None
+    candidate_matches: list[ComparisonCandidateMatch] = Field(default_factory=list)
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def normalize_question(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("comparison question must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("comparison question cannot be blank")
+        return normalized
+
+    @field_validator("dimension", "surface_text", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("comparison text fields must be strings")
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_unique_candidate_ids(self) -> "ProductComparison":
+        product_ids = [item.product_id for item in self.candidate_matches]
+        if len(product_ids) != len(set(product_ids)):
+            raise ValueError("comparison candidate product IDs must be unique")
+        return self
+
+
 class ApproximatePrice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -256,12 +310,42 @@ class TurnQuery(BaseModel):
     approximate_price: ApproximatePrice | None = None
     relative_price: RelativePriceDirection | None = None
     product_question: ProductQuestion | None = None
+    product_comparison: ProductComparison | None = None
     cancel_pending: bool = False
 
     @model_validator(mode="after")
     def validate_turn_contract(self) -> "TurnQuery":
         if (self.intent == "product_question") != (self.product_question is not None):
             raise ValueError("product_question is required only for product_question intent")
+        if self.intent == "product_comparison":
+            if self.product_comparison is None:
+                raise ValueError(
+                    "product_comparison is required for product_comparison intent"
+                )
+            if self.product_comparison.surface_text is None:
+                raise ValueError(
+                    "product comparisons require a target surface_text"
+                )
+            if (
+                self.reference is not None
+                or self.category_reference is not None
+                or self.semantic_term_operations
+                or self.slot_operations
+                or self.approximate_price is not None
+                or self.relative_price is not None
+            ):
+                raise ValueError(
+                    "product comparisons cannot include search mutations or "
+                    "single-product references"
+                )
+        elif (
+            self.intent != "clarification_answer"
+            and self.product_comparison is not None
+        ):
+            raise ValueError(
+                "product_comparison is allowed only for comparison or "
+                "clarification intents"
+            )
         if self.category_reference is not None and any(
             operation.slot in {"category", "sub_category"}
             for operation in self.slot_operations

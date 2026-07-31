@@ -6,6 +6,10 @@ from shop_agent.models.conversation import (
     ConversationState,
     QuerySnapshot,
 )
+from shop_agent.models.comparison import (
+    ComparisonAssessment,
+    ComparisonProductMaterial,
+)
 from shop_agent.models.query import ParsedIntent, PriceCompilationReference, SearchConstraints
 from shop_agent.models.retrieval import (
     EvidenceChunk,
@@ -32,6 +36,9 @@ class ShoppingState(TypedDict, total=False):
     conversation_state: ConversationState
     turn_query: TurnQuery
     resolved_product_id: str
+    comparison_product_ids: list[str]
+    comparison_materials: list[ComparisonProductMaterial]
+    comparison_assessment: ComparisonAssessment
     resolved_brand: str
     resolved_category_scope: CategoryCandidate
     allowed_category_scopes: tuple[CategoryCandidate, ...]

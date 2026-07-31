@@ -24,6 +24,7 @@ from shop_agent.models.retrieval import (
 )
 from shop_agent.models.turn_query import TurnCandidateSummary
 from shop_agent.services.dashscope_chat import (
+    DashScopeComparisonAssessor,
     DashScopeEvidenceMapper,
     DashScopeResponseGenerator,
     DashScopeTurnQueryParser,
@@ -247,6 +248,7 @@ async def test_live_single_turn_shopping_flow() -> None:
             response_generator=DashScopeResponseGenerator(settings),
             catalog=catalog,
             settings=settings,
+            comparison_assessor=DashScopeComparisonAssessor(settings),
         )
     )
     app = create_app(
@@ -362,6 +364,16 @@ async def _assert_live_turn_query_parser_contracts(
         for item in ordinal.reference.candidate_matches
         if item.matches
     ] == [earphones[1].product_id]
+
+    comparison = await parser.parse("第一款和第二款哪个续航更好", context)
+    assert comparison.intent == "product_comparison"
+    assert comparison.product_comparison is not None
+    assert comparison.product_comparison.dimension == "续航"
+    assert [
+        item.product_id
+        for item in comparison.product_comparison.candidate_matches
+        if item.selected
+    ] == [earphones[0].product_id, earphones[1].product_id]
 
     brand = await parser.parse("那个小米的", context)
     assert brand.reference is not None

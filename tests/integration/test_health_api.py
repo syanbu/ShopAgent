@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import httpx
@@ -5,6 +6,7 @@ import pytest
 
 from shop_agent.api.app import create_app
 from shop_agent.api.dependencies import ApiDependencies
+from shop_agent.api.health import health as health_endpoint
 from shop_agent.catalog import ProductCatalog
 from shop_agent.config import Settings
 from tests.integration.api_fakes import FakeGraph, FakeReadinessProbe
@@ -15,13 +17,20 @@ def _dependencies(
     *,
     qdrant_ready: bool = True,
     api_key: str = "test-key",
+    comparison_model: str = "qwen3.6-flash",
+    evidence_model: str = "qwen3.6-flash",
 ) -> tuple[ApiDependencies, FakeReadinessProbe]:
     probe = FakeReadinessProbe(qdrant_ready)
     return (
         ApiDependencies(
             graph=FakeGraph([]),
             catalog=ProductCatalog.load(root),
-            settings=Settings(dashscope_api_key=api_key, dataset_root=root),
+            settings=Settings(
+                dashscope_api_key=api_key,
+                comparison_model=comparison_model,
+                evidence_model=evidence_model,
+                dataset_root=root,
+            ),
             readiness_probe=probe,
         ),
         probe,
@@ -77,6 +86,31 @@ async def test_health_returns_503_when_model_config_is_missing(
 
     assert response.status_code == 503
     assert response.json()["dependencies"]["models"] == "not_ready"
+
+
+@pytest.mark.asyncio
+async def test_health_requires_comparison_model(
+    sample_dataset_root: Path,
+) -> None:
+    dependencies, _ = _dependencies(sample_dataset_root, comparison_model="")
+
+    response = await _health(dependencies)
+
+    assert response.status_code == 503
+    assert response.json()["dependencies"]["models"] == "not_ready"
+
+
+@pytest.mark.asyncio
+async def test_health_requires_evidence_model(
+    sample_dataset_root: Path,
+) -> None:
+    dependencies, _ = _dependencies(sample_dataset_root, evidence_model="")
+
+    response = await health_endpoint(dependencies)
+
+    assert response.status_code == 503
+    body = json.loads(response.body)
+    assert body["dependencies"]["models"] == "not_ready"
 
 
 @pytest.mark.asyncio

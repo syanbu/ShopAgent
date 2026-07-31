@@ -11,11 +11,16 @@ from shop_agent.catalog import ProductCatalog
 from shop_agent.cli.index_products import index_catalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
+from shop_agent.models.comparison import (
+    ComparisonEvidence,
+    ComparisonProductMaterial,
+)
 from shop_agent.models.conversation import PendingClarification, QuerySnapshot
 from shop_agent.models.query import EvidenceCondition, ParsedIntent, SearchConstraints
 from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
 from shop_agent.models.turn_query import TurnCandidateSummary, TurnQuery
 from shop_agent.services.dashscope_chat import (
+    DashScopeComparisonAssessor,
     DashScopeEvidenceMapper,
     DashScopeIntentParser,
     DashScopeResponseGenerator,
@@ -35,6 +40,8 @@ def settings(tmp_path: Path) -> Settings:
         dataset_root=tmp_path,
         model_timeout_seconds=7,
         chat_model="qwen3.7-max",
+        comparison_model="qwen3.6-flash",
+        evidence_model="qwen3.6-flash",
         embedding_model="qwen3.7-text-embedding",
         rerank_model="qwen3-rerank",
     )
@@ -258,6 +265,7 @@ def test_turn_query_prompt_contains_schema_taxonomy_and_complete_contract() -> N
             "switch_category",
             "more_results",
             "product_question",
+            "product_comparison",
             "clarification_answer",
             "non_shopping",
         )
@@ -284,6 +292,8 @@ def test_turn_query_prompt_contains_schema_taxonomy_and_complete_contract() -> N
     assert "当前 message 中的连续原文片段" in prompt
     assert "没有显式引用时 reference 必须为 null" in prompt
     assert "candidate_matches" in prompt
+    assert "missing_comparison_dimension" in prompt
+    assert "ambiguous_comparison_targets" in prompt
     assert "每个候选 product_id 恰好一次" in prompt
     assert "不能为了避免澄清只选择一个" in prompt
     assert "不得遗漏" in prompt
@@ -300,6 +310,146 @@ def test_turn_query_prompt_contains_schema_taxonomy_and_complete_contract() -> N
         '"product_question":{"text":"最贵的呢","kind":"structured",'
         '"field":"sku"}}'
     ) in prompt
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_accepts_recent_candidate_comparison(
+    settings: Settings,
+) -> None:
+    response = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "product_comparison",
+                "product_comparison": {
+                    "question": "第一款和第二款哪个更保湿",
+                    "dimension": "保湿",
+                    "surface_text": "第一款和第二款",
+                    "candidate_matches": [
+                        {"product_id": "p1", "selected": True},
+                        {"product_id": "p2", "selected": True},
+                        {"product_id": "p3", "selected": False},
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(return_value=response)
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _turn_parser(settings, client).parse(
+        "第一款和第二款哪个更保湿",
+        _turn_context(),
+    )
+
+    assert result.product_comparison is not None
+    assert result.product_comparison.dimension == "保湿"
+    assert [
+        item.product_id
+        for item in result.product_comparison.candidate_matches
+        if item.selected
+    ] == ["p1", "p2"]
+
+
+def _comparison_material(product_id: str) -> ComparisonProductMaterial:
+    return ComparisonProductMaterial(
+        product_id=product_id,
+        title=f"商品{product_id}",
+        evidence=[
+            ComparisonEvidence(
+                evidence_id=f"{product_id}:structured",
+                source_type="structured_facts",
+                content=f"{product_id} 的真实资料",
+            )
+        ],
+    )
+
+
+def _comparison_response(*, evidence_id: str = "p1:structured") -> SimpleNamespace:
+    return _chat_response(
+        json.dumps(
+            {
+                "dimension": "保湿",
+                "products": [
+                    {
+                        "product_id": "p1",
+                        "evidence_ids": [evidence_id],
+                        "supported_summary": "p1 有明确保湿资料。",
+                        "limitations": [],
+                    },
+                    {
+                        "product_id": "p2",
+                        "evidence_ids": ["p2:structured"],
+                        "supported_summary": "p2 有基础保湿资料。",
+                        "limitations": [],
+                    },
+                ],
+                "outcome": "winner",
+                "winner_product_id": "p1",
+                "reason": "p1 的保湿资料更明确。",
+                "response_text": "现有资料更支持 p1 的保湿优势。",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_comparison_assessor_accepts_only_grounded_evidence(
+    settings: Settings,
+) -> None:
+    create = AsyncMock(return_value=_comparison_response())
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        assessor = DashScopeComparisonAssessor(settings)
+
+    result = await assessor.assess(
+        "第一款和第二款哪个更保湿",
+        "保湿",
+        [_comparison_material("p1"), _comparison_material("p2")],
+    )
+
+    assert result.outcome == "winner"
+    assert result.winner_product_id == "p1"
+    assert create.await_args.kwargs["model"] == "qwen3.6-flash"
+
+
+def test_explicit_blank_gateway_model_does_not_fall_back(
+    settings: Settings,
+) -> None:
+    blank_comparison = settings.model_copy(update={"comparison_model": ""})
+
+    assessor = DashScopeComparisonAssessor(blank_comparison)
+
+    assert assessor._model == ""
+
+
+@pytest.mark.asyncio
+async def test_comparison_assessor_rejects_unknown_evidence_after_retry(
+    settings: Settings,
+) -> None:
+    invalid = _comparison_response(evidence_id="p2:structured")
+    create = AsyncMock(side_effect=[invalid, invalid])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        assessor = DashScopeComparisonAssessor(settings)
+
+    with pytest.raises(ServiceError) as caught:
+        await assessor.assess(
+            "第一款和第二款哪个更保湿",
+            "保湿",
+            [_comparison_material("p1"), _comparison_material("p2")],
+        )
+
+    assert caught.value.code == "COMPARISON_PARSE_FAILED"
+    assert create.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1431,6 +1581,7 @@ async def test_evidence_mapper_includes_source_priority_and_chunk_fields(
     )
     assert assessment.checks[0].conflicting_evidence_ids == ["review-1"]
     request = create.await_args.kwargs
+    assert request["model"] == "qwen3.6-flash"
     assert "response_format" not in request
     assert request["tool_choice"] == {
         "type": "function",

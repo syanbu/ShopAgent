@@ -5,6 +5,11 @@ from pathlib import Path
 from shop_agent.catalog import ProductCatalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
+from shop_agent.models.comparison import (
+    ComparisonAssessment,
+    ComparisonProductFinding,
+    ComparisonProductMaterial,
+)
 from shop_agent.models.conversation import ConversationRecord, ConversationState
 from shop_agent.models.product import Product
 from shop_agent.models.query import ParsedIntent, SearchConstraints
@@ -279,6 +284,51 @@ class FakeResponseGenerator:
             yield delta
 
 
+class FakeComparisonAssessor:
+    def __init__(
+        self,
+        assessment: ComparisonAssessment | None = None,
+        error: ServiceError | None = None,
+    ) -> None:
+        self.assessment = assessment
+        self.error = error
+        self.calls: list[
+            tuple[str, str, list[ComparisonProductMaterial]]
+        ] = []
+
+    async def assess(
+        self,
+        question: str,
+        dimension: str,
+        materials: Sequence[ComparisonProductMaterial],
+    ) -> ComparisonAssessment:
+        copied_materials = [
+            material.model_copy(deep=True) for material in materials
+        ]
+        self.calls.append((question, dimension, copied_materials))
+        if self.error is not None:
+            raise self.error
+        if self.assessment is not None:
+            return self.assessment.model_copy(deep=True)
+        findings = [
+            ComparisonProductFinding(
+                product_id=material.product_id,
+                evidence_ids=[material.evidence[0].evidence_id],
+                supported_summary=f"{material.title} 的{dimension}资料",
+                limitations=[],
+            )
+            for material in materials
+        ]
+        return ComparisonAssessment(
+            dimension=dimension,
+            products=findings,
+            outcome="winner",
+            winner_product_id=materials[0].product_id,
+            reason=f"{materials[0].title} 的现有资料更支持{dimension}优势。",
+            response_text=f"{materials[0].title} 在现有资料中更有优势。",
+        )
+
+
 @dataclass
 class WorkflowHarness:
     catalog: ProductCatalog
@@ -288,6 +338,7 @@ class WorkflowHarness:
     retrieval: FakeRetrievalService
     evidence: FakeEvidenceService
     response: FakeResponseGenerator
+    comparison: FakeComparisonAssessor
 
 
 def build_harness(
@@ -328,6 +379,7 @@ def build_harness(
         retrieval=FakeRetrievalService(products=products, return_hits=return_hits),
         evidence=FakeEvidenceService(catalog=catalog, eligible=eligible),
         response=FakeResponseGenerator(),
+        comparison=FakeComparisonAssessor(),
     )
 
 

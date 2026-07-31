@@ -17,6 +17,8 @@ async def health(dependencies: Dependencies) -> JSONResponse:
         (
             settings.dashscope_api_key.strip(),
             settings.chat_model.strip(),
+            settings.comparison_model.strip(),
+            settings.evidence_model.strip(),
             settings.embedding_model.strip(),
             settings.rerank_model.strip(),
         )

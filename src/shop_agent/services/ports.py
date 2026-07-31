@@ -3,6 +3,10 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shop_agent.models.comparison import (
+    ComparisonAssessment,
+    ComparisonProductMaterial,
+)
 from shop_agent.models.conversation import PendingClarification, QuerySnapshot
 from shop_agent.models.query import EvidenceCondition, ParsedIntent
 from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
@@ -51,6 +55,16 @@ class EvidenceMapper(Protocol):
         conditions: Sequence[EvidenceCondition],
         evidence: Sequence[EvidenceChunk],
     ) -> EvidenceAssessment:
+        raise NotImplementedError
+
+
+class ComparisonAssessor(Protocol):
+    async def assess(
+        self,
+        question: str,
+        dimension: str,
+        materials: Sequence[ComparisonProductMaterial],
+    ) -> ComparisonAssessment:
         raise NotImplementedError
 
 

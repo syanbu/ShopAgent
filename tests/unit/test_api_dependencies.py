@@ -5,7 +5,10 @@ from shop_agent.api import dependencies as api_dependencies
 from shop_agent.config import Settings
 from shop_agent.services import conversation_repository as repository_module
 from shop_agent.services.conversation_repository import SqliteConversationRepository
-from shop_agent.services.dashscope_chat import DashScopeTurnQueryParser
+from shop_agent.services.dashscope_chat import (
+    DashScopeComparisonAssessor,
+    DashScopeTurnQueryParser,
+)
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from tests.unit.workflow_fakes import build_harness
 
@@ -51,6 +54,9 @@ def test_build_api_dependencies_injects_lazy_repository_and_catalog_turn_parser(
     assert isinstance(workflow.conversation_repository, SqliteConversationRepository)
     assert workflow.conversation_repository._database_path == settings.conversation_db_path
     assert isinstance(workflow.turn_query_parser, DashScopeTurnQueryParser)
+    assert isinstance(workflow.comparison_assessor, DashScopeComparisonAssessor)
+    assert workflow.turn_query_parser._model == settings.chat_model
+    assert workflow.comparison_assessor._model == settings.comparison_model
     assert workflow.turn_query_parser._categories == ("数码电子",)
     assert workflow.turn_query_parser._sub_categories == ("蓝牙耳机",)
     assert workflow.turn_query_parser._category_pairs == (("数码电子", "蓝牙耳机"),)

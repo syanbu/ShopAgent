@@ -273,6 +273,82 @@ async def test_compiled_http_generation_failure_persists_candidates_for_follow_u
 
 
 @pytest.mark.asyncio
+async def test_compiled_http_compares_recent_products_without_new_retrieval(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "slot_operations": [
+                    {
+                        "slot": "category",
+                        "operation": "replace",
+                        "value": "数码电子",
+                    },
+                    {
+                        "slot": "sub_category",
+                        "operation": "replace",
+                        "value": "蓝牙耳机",
+                    },
+                ],
+            }
+        ),
+        TurnQuery.model_validate(
+            {
+                "schema_version": 1,
+                "intent": "product_comparison",
+                "product_comparison": {
+                    "question": "第一款和第二款哪个续航更好",
+                    "dimension": "续航",
+                    "surface_text": "第一款和第二款",
+                    "candidate_matches": [
+                        {"product_id": "p1", "selected": True},
+                        {"product_id": "p2", "selected": True},
+                        {"product_id": "p3", "selected": False},
+                    ],
+                },
+            }
+        ),
+    ]
+    dependencies, parser, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=turns,
+    )
+
+    first = await _post(
+        dependencies,
+        {"conversation_id": "comparison", "message": "推荐蓝牙耳机"},
+    )
+    compared = await _post(
+        dependencies,
+        {
+            "conversation_id": "comparison",
+            "message": "第一款和第二款哪个续航更好",
+        },
+    )
+
+    assert parse_sse(first.text)[-1].data["status"] == "completed"
+    comparison_events = parse_sse(compared.text)
+    assert [event.name for event in comparison_events] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert comparison_events[1].data["delta"] == "第一款在现有资料中更有优势。"
+    assert comparison_events[-1].data["status"] == "completed"
+    assert len(retrieval.calls) == 1
+    assert parser.contexts[1].recent_candidates
+    saved = await repository.load("comparison")
+    assert saved is not None
+    assert saved.state.focused_product_id == "p1"
+    assert [
+        candidate.product_id for candidate in saved.state.recent_candidates
+    ] == ["p1", "p2", "p3"]
+
+
+@pytest.mark.asyncio
 async def test_failure_before_products_is_failed(sample_dataset_root: Path) -> None:
     graph = FakeGraph(
         [],

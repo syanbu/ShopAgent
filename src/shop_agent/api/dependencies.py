@@ -9,6 +9,7 @@ from shop_agent.catalog import ProductCatalog
 from shop_agent.config import Settings
 from shop_agent.models.state import ShoppingState
 from shop_agent.services.dashscope_chat import (
+    DashScopeComparisonAssessor,
     DashScopeEvidenceMapper,
     DashScopeResponseGenerator,
     DashScopeTurnQueryParser,
@@ -99,6 +100,7 @@ def build_api_dependencies(settings: Settings | None = None) -> ApiDependencies:
             response_generator=DashScopeResponseGenerator(resolved_settings),
             catalog=catalog,
             settings=resolved_settings,
+            comparison_assessor=DashScopeComparisonAssessor(resolved_settings),
         )
     )
     return ApiDependencies(

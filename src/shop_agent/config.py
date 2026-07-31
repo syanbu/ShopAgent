@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_sdk_base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     chat_model: str = "qwen3.7-max"
+    comparison_model: str = "qwen3.6-flash"
+    evidence_model: str = "qwen3.6-flash"
     embedding_model: str = "qwen3.7-text-embedding"
     rerank_model: str = "qwen3-rerank"
     embedding_dimension: int = 1024

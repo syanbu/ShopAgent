@@ -303,6 +303,18 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 
 `required_features` 和 `excluded_features` 保持开放文本，以承载“适合通勤”“不甜腻”“穿着不贴身”等跨品类自然语言需求。开放文本只影响条件表达，不降低事实要求；商品是否满足仍必须由原始 JSON 证据判断。
 
+### 证据三态校验使用独立低延迟模型
+
+`DashScopeEvidenceMapper` 使用独立的 `EVIDENCE_MODEL` 配置，默认
+`qwen3.6-flash`。证据校验属于边界明确的结构化任务：根据候选商品 JSON 片段，把每个
+条件映射为 `supported`、`contradicted` 或 `unknown`，因此使用低延迟模型减少候选并行
+校验的等待时间。意图解析和普通商品回答仍使用 `CHAT_MODEL=qwen3.7-max`，商品对比使用
+独立的 `COMPARISON_MODEL`。
+
+模型切换不放宽事实约束：仍强制调用 `submit_evidence_assessment`，并继续执行 Pydantic
+字段校验、condition ID 精确覆盖校验、证据 ID 校验和现有的一次自动纠错。健康检查也
+要求 `EVIDENCE_MODEL` 非空，防止配置缺失后静默回退到聊天模型。
+
 ## 代码与验证
 
 ### 完成状态
@@ -370,3 +382,4 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 | 2026-07-25 | 证据输出改为强制 Function Calling | 通过扁平工具参数 Schema 固定返回字段，并保留 Pydantic 与动态 condition ID 校验作为本地保障 |
 | 2026-07-27 | 数码电子数据扩充至 37 款 | 新增4款智能手机和8款真无线耳机，增加品牌、价位与连续推荐场景的候选覆盖 |
 | 2026-07-29 | 状态更新为已完成 | 多轮 Query 引擎已用 Catalog 候选基数和可恢复澄清关闭复合子类歧义；本文范围内实现与验证项均已完成 |
+| 2026-07-31 | 证据三态校验切换为独立 Flash 模型 | 降低多候选并行证据校验延迟，同时保留强制 Function Calling 和本地严格校验 |

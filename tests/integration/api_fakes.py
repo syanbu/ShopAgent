@@ -8,6 +8,11 @@ from shop_agent.api.dependencies import ApiDependencies
 from shop_agent.catalog import ProductCatalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
+from shop_agent.models.comparison import (
+    ComparisonAssessment,
+    ComparisonProductFinding,
+    ComparisonProductMaterial,
+)
 from shop_agent.models.conversation import ConversationRecord, ConversationState
 from shop_agent.models.product import Product
 from shop_agent.models.query import ParsedIntent, SearchConstraints
@@ -349,6 +354,38 @@ class SequencedResponseGenerator:
         yield outcome
 
 
+class DeterministicComparisonAssessor:
+    def __init__(self) -> None:
+        self.calls: list[
+            tuple[str, str, list[ComparisonProductMaterial]]
+        ] = []
+
+    async def assess(
+        self,
+        question: str,
+        dimension: str,
+        materials: Sequence[ComparisonProductMaterial],
+    ) -> ComparisonAssessment:
+        copied = [material.model_copy(deep=True) for material in materials]
+        self.calls.append((question, dimension, copied))
+        return ComparisonAssessment(
+            dimension=dimension,
+            products=[
+                ComparisonProductFinding(
+                    product_id=material.product_id,
+                    evidence_ids=[material.evidence[0].evidence_id],
+                    supported_summary=f"{material.title} 的{dimension}资料",
+                    limitations=[],
+                )
+                for material in materials
+            ],
+            outcome="winner",
+            winner_product_id=materials[0].product_id,
+            reason="第一款在现有资料中更有优势。",
+            response_text="第一款在现有资料中更有优势。",
+        )
+
+
 def compiled_chat_dependencies(
     tmp_path: Path,
     *,
@@ -384,6 +421,7 @@ def compiled_chat_dependencies(
             response_generator=response_generator or DeterministicResponseGenerator(),
             catalog=catalog,
             settings=settings,
+            comparison_assessor=DeterministicComparisonAssessor(),
         )
     )
     return (

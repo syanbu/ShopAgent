@@ -7,7 +7,13 @@ from typing import Literal, assert_never
 
 from langgraph.types import StreamWriter
 
+from shop_agent.chunking import build_product_chunks
 from shop_agent.errors import ServiceError
+from shop_agent.models.comparison import (
+    ComparisonAssessment,
+    ComparisonEvidence,
+    ComparisonProductMaterial,
+)
 from shop_agent.models.conversation import (
     CandidateReference,
     ConversationState,
@@ -55,9 +61,11 @@ PendingActionRoute = Literal["resume_pending_action", "resolve_reference"]
 ResumedActionRoute = Literal["resolve_reference", "end"]
 ReferenceResolutionRoute = Literal["resolved", "needs_clarification"]
 CategoryResolutionRoute = Literal["resolved", "needs_clarification"]
+ComparisonResolutionRoute = Literal["resolved", "needs_clarification"]
 TurnRoute = Literal[
     "search",
     "product_question",
+    "product_comparison",
     "clarification_answer",
     "non_shopping",
 ]
@@ -469,6 +477,228 @@ class WorkflowNodes:
             "clarification_message": message,
             "response_mode": "clarification",
         }
+
+    async def resolve_comparison_targets(
+        self,
+        state: ShoppingState,
+    ) -> dict[str, object]:
+        turn = state["turn_query"]
+        comparison = turn.product_comparison
+        if comparison is None or turn.intent != "product_comparison":
+            raise _comparison_error("comparison request is unavailable")
+
+        conversation = state["conversation_state"]
+        recent_ids = [
+            candidate.product_id for candidate in conversation.recent_candidates
+        ]
+        selected_ids = [
+            item.product_id
+            for item in comparison.candidate_matches
+            if item.selected
+        ]
+        loaded_pending = _loaded_pending(state)
+        comparison_pending = (
+            loaded_pending
+            if loaded_pending is not None
+            and loaded_pending.kind
+            in {
+                "ambiguous_comparison_targets",
+                "missing_comparison_dimension",
+            }
+            else None
+        )
+
+        if len(recent_ids) < 2:
+            updated = conversation.model_copy(
+                update={"pending_clarification": None},
+                deep=True,
+            )
+            return {
+                "conversation_state": updated,
+                "clarification_message": (
+                    "请先让系统推荐至少两款商品，再选择其中两到三款进行对比。"
+                ),
+                "response_mode": "clarification",
+            }
+
+        if not 2 <= len(selected_ids) <= 3:
+            if comparison_pending is not None:
+                updated = conversation.model_copy(
+                    update={"pending_clarification": None},
+                    deep=True,
+                )
+                message = "仍无法确认要比较的商品，请重新完整描述对比需求。"
+            else:
+                pending = PendingClarification(
+                    kind="ambiguous_comparison_targets",
+                    candidate_product_ids=tuple(recent_ids),
+                    suspended_turn_query=turn.model_copy(deep=True),
+                    attempt_count=1,
+                )
+                updated = conversation.model_copy(
+                    update={"pending_clarification": pending},
+                    deep=True,
+                )
+                message = "请选择最近展示的两到三款商品进行对比。"
+            return {
+                "conversation_state": updated,
+                "clarification_message": message,
+                "response_mode": "clarification",
+            }
+
+        if comparison.dimension is None:
+            if comparison_pending is not None:
+                updated = conversation.model_copy(
+                    update={"pending_clarification": None},
+                    deep=True,
+                )
+                message = "仍缺少比较维度，请重新完整描述对比需求。"
+            else:
+                pending = PendingClarification(
+                    kind="missing_comparison_dimension",
+                    candidate_product_ids=tuple(selected_ids),
+                    suspended_turn_query=turn.model_copy(deep=True),
+                    attempt_count=1,
+                )
+                updated = conversation.model_copy(
+                    update={"pending_clarification": pending},
+                    deep=True,
+                )
+                message = "你更想比较哪方面，例如价格、规格还是使用体验？"
+            return {
+                "conversation_state": updated,
+                "clarification_message": message,
+                "response_mode": "clarification",
+            }
+
+        return {"comparison_product_ids": selected_ids}
+
+    async def load_comparison_materials(
+        self,
+        state: ShoppingState,
+    ) -> dict[str, object]:
+        materials: list[ComparisonProductMaterial] = []
+        for product_id in state["comparison_product_ids"]:
+            try:
+                product = self.dependencies.catalog.get(product_id)
+                source_path = self.dependencies.catalog.source_path(product_id)
+            except (KeyError, ValueError) as error:
+                raise _comparison_error(
+                    "comparison product is unavailable"
+                ) from error
+            structured_content = _single_line_json(
+                {
+                    "product_id": product.product_id,
+                    "title": product.title,
+                    "brand": product.brand,
+                    "category": product.category,
+                    "sub_category": product.sub_category,
+                    "base_price": product.base_price,
+                    "skus": [
+                        sku.model_dump(mode="json") for sku in product.skus
+                    ],
+                }
+            )
+            evidence = [
+                ComparisonEvidence(
+                    evidence_id=f"{product_id}:structured",
+                    source_type="structured_facts",
+                    content=structured_content,
+                ),
+                *[
+                    ComparisonEvidence(
+                        evidence_id=chunk.chunk_id,
+                        source_type=chunk.chunk_type,
+                        content=chunk.text,
+                    )
+                    for chunk in build_product_chunks(product, source_path)
+                ],
+            ]
+            materials.append(
+                ComparisonProductMaterial(
+                    product_id=product.product_id,
+                    title=product.title,
+                    evidence=evidence,
+                )
+            )
+        return {"comparison_materials": materials}
+
+    async def assess_comparison(
+        self,
+        state: ShoppingState,
+    ) -> dict[str, object]:
+        comparison = state["turn_query"].product_comparison
+        if comparison is None or comparison.dimension is None:
+            raise _comparison_error("comparison dimension is unavailable")
+        assessor = self.dependencies.comparison_assessor
+        if assessor is None:
+            raise ServiceError(
+                "INTERNAL_ERROR",
+                "comparison assessor unavailable",
+                retryable=False,
+            )
+        assessment = await assessor.assess(
+            comparison.question,
+            comparison.dimension,
+            state["comparison_materials"],
+        )
+        _validate_comparison_assessment(
+            assessment,
+            dimension=comparison.dimension,
+            materials=state["comparison_materials"],
+        )
+        return {"comparison_assessment": assessment}
+
+    async def persist_comparison_focus(
+        self,
+        state: ShoppingState,
+    ) -> dict[str, object]:
+        _, repository = self._require_multi_turn_dependencies()
+        conversation = state["conversation_state"]
+        assessment = state["comparison_assessment"]
+        focus = (
+            assessment.winner_product_id
+            if assessment.outcome == "winner"
+            else None
+        )
+        if focus is not None and focus not in {
+            candidate.product_id for candidate in conversation.recent_candidates
+        }:
+            raise _comparison_error("comparison winner is outside recent candidates")
+        updated = conversation.model_copy(
+            update={
+                "focused_product_id": focus,
+                "pending_clarification": None,
+            },
+            deep=True,
+        )
+        expected_version = state.get("pending_expected_version")
+        saved = await repository.save(updated, expected_version=expected_version)
+        _log_conversation_persisted(
+            state,
+            expected_version=expected_version,
+            saved_version=saved.version,
+            state_kind="product_comparison_focus",
+        )
+        return {
+            "conversation_record": saved,
+            "conversation_state": saved.state,
+            "pending_expected_version": saved.version,
+        }
+
+    async def emit_comparison_response(
+        self,
+        state: ShoppingState,
+        writer: StreamWriter,
+    ) -> dict[str, str]:
+        response_text = state["comparison_assessment"].response_text
+        writer(
+            {
+                "event": "text_delta",
+                "data": TextDeltaData(delta=response_text).model_dump(mode="json"),
+            }
+        )
+        return {"response_text": response_text}
 
     async def persist_clarification(
         self,
@@ -1074,6 +1304,16 @@ def route_category_resolution(state: ShoppingState) -> CategoryResolutionRoute:
     )
 
 
+def route_comparison_resolution(
+    state: ShoppingState,
+) -> ComparisonResolutionRoute:
+    return (
+        "needs_clarification"
+        if state.get("response_mode") == "clarification"
+        else "resolved"
+    )
+
+
 def route_turn(state: ShoppingState) -> TurnRoute:
     return _route_turn_value(state["turn_query"])
 
@@ -1095,6 +1335,8 @@ def _route_turn_value(turn: TurnQuery) -> TurnRoute:
         return "search"
     if turn.intent == "product_question":
         return "product_question"
+    if turn.intent == "product_comparison":
+        return "product_comparison"
     if turn.intent == "clarification_answer":
         return "clarification_answer"
     return "non_shopping"
@@ -1114,6 +1356,57 @@ def _merge_pending_turn(
     has_query_snapshot: bool = False,
 ) -> TurnQuery | None:
     suspended = pending.suspended_turn_query
+    if pending.kind == "missing_comparison_dimension":
+        suspended_comparison = suspended.product_comparison
+        answer_comparison = answer.product_comparison
+        if (
+            suspended_comparison is None
+            or answer_comparison is None
+            or answer_comparison.dimension is None
+        ):
+            return None
+        restored_comparison = suspended_comparison.model_copy(
+            update={"dimension": answer_comparison.dimension},
+            deep=True,
+        )
+        return TurnQuery.model_validate(
+            suspended.model_copy(
+                update={"product_comparison": restored_comparison},
+                deep=True,
+            ).model_dump()
+        )
+
+    if pending.kind == "ambiguous_comparison_targets":
+        suspended_comparison = suspended.product_comparison
+        answer_comparison = answer.product_comparison
+        if (
+            suspended_comparison is None
+            or answer_comparison is None
+            or not answer_comparison.candidate_matches
+        ):
+            return None
+        restored_comparison = suspended_comparison.model_copy(
+            update={
+                "surface_text": answer_comparison.surface_text,
+                "candidate_matches": [
+                    item.model_copy(deep=True)
+                    for item in answer_comparison.candidate_matches
+                ],
+                "dimension": (
+                    answer_comparison.dimension
+                    if answer_comparison.dimension is not None
+                    else suspended_comparison.dimension
+                ),
+            },
+            deep=True,
+        )
+        return TurnQuery.model_validate(
+            suspended.model_copy(
+                update={"product_comparison": restored_comparison},
+                deep=True,
+            ).model_dump()
+        )
+
     if pending.kind == "ambiguous_reference":
         reference = (
             answer.reference.model_copy(deep=True)
@@ -1530,6 +1823,43 @@ def _log_conversation_persisted(
 
 def _stable_exact_ids(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _validate_comparison_assessment(
+    assessment: ComparisonAssessment,
+    *,
+    dimension: str,
+    materials: Sequence[ComparisonProductMaterial],
+) -> None:
+    if assessment.dimension != dimension:
+        raise _comparison_error("comparison dimension changed during assessment")
+    expected_ids = [material.product_id for material in materials]
+    actual_ids = [finding.product_id for finding in assessment.products]
+    if actual_ids != expected_ids:
+        raise _comparison_error(
+            "comparison assessment does not match target products"
+        )
+    evidence_by_product = {
+        material.product_id: {
+            evidence.evidence_id for evidence in material.evidence
+        }
+        for material in materials
+    }
+    for finding in assessment.products:
+        if not set(finding.evidence_ids).issubset(
+            evidence_by_product[finding.product_id]
+        ):
+            raise _comparison_error(
+                "comparison assessment contains untrusted evidence"
+            )
+
+
+def _comparison_error(message: str) -> ServiceError:
+    return ServiceError(
+        "COMPARISON_PARSE_FAILED",
+        message,
+        retryable=False,
+    )
 
 
 def build_structured_product_question_prompt(

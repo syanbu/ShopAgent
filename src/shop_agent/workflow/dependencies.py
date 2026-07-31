@@ -14,7 +14,11 @@ from shop_agent.models.retrieval import (
     ValidatedCandidate,
 )
 from shop_agent.services.conversation_repository import ConversationRepository
-from shop_agent.services.ports import ResponseGenerator, TurnQueryParser
+from shop_agent.services.ports import (
+    ComparisonAssessor,
+    ResponseGenerator,
+    TurnQueryParser,
+)
 
 
 class RetrievalOperations(Protocol):
@@ -71,4 +75,5 @@ class WorkflowDependencies:
     response_generator: ResponseGenerator
     catalog: ProductCatalog
     settings: Settings
+    comparison_assessor: ComparisonAssessor | None = None
     id_factory: Callable[[], str] = _new_id
