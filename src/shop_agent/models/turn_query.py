@@ -311,10 +311,25 @@ class TurnQuery(BaseModel):
     relative_price: RelativePriceDirection | None = None
     product_question: ProductQuestion | None = None
     product_comparison: ProductComparison | None = None
+    skip_preference_question: bool = False
     cancel_pending: bool = False
 
     @model_validator(mode="after")
     def validate_turn_contract(self) -> "TurnQuery":
+        if self.skip_preference_question:
+            if self.intent not in {
+                "new_search",
+                "switch_category",
+                "clarification_answer",
+            }:
+                raise ValueError(
+                    "skip_preference_question is allowed only for new_search, "
+                    "switch_category, or clarification_answer"
+                )
+            if self.cancel_pending:
+                raise ValueError(
+                    "skip_preference_question and cancel_pending cannot coexist"
+                )
         if (self.intent == "product_question") != (self.product_question is not None):
             raise ValueError("product_question is required only for product_question intent")
         if self.intent == "product_comparison":

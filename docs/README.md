@@ -11,6 +11,13 @@
 | 功能文档约定 | [features/README.md](features/README.md) |
 | 功能文档模板 | [features/_template.md](features/_template.md) |
 
+## 设计说明
+
+| 内容 | 文档 |
+|---|---|
+| 当前多轮购物工作流、状态生命周期、主动追问与性价比编译 | [explanations/multi-turn-shopping-workflow-lifecycle.md](explanations/multi-turn-shopping-workflow-lifecycle.md) |
+| 早期单轮推荐架构（部分生命周期描述已过时） | [explanations/single-turn-shopping-system-design.md](explanations/single-turn-shopping-system-design.md) |
+
 ## 功能索引
 
 功能开发开始时，在下表登记对应文档。状态使用“提议”“开发中”“已完成”或“已废弃”。
@@ -21,6 +28,7 @@
 | 跨品类商品约束与 SKU 匹配 | 已完成 | [features/cross-category-shopping-constraints.md](features/cross-category-shopping-constraints.md) | `src/shop_agent/models/query.py`、`src/shop_agent/sku_attributes.py`、`src/shop_agent/catalog.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/evidence.py`、`src/shop_agent/workflow/` |
 | 多轮 Query 编译、稳定条件细化与指代消解 | 已完成 | [features/multi-turn-query-engine.md](features/multi-turn-query-engine.md) | `src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/services/ports.py`、`src/shop_agent/services/conversation_repository.py`、`src/shop_agent/services/reference_resolver.py`、`src/shop_agent/services/multi_turn_query_compiler.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/retrieval.py`、`src/shop_agent/services/qdrant_store.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py`、`src/shop_agent/api/dependencies.py`、`src/shop_agent/api/chat.py`、`tests/unit/test_model_gateways.py`、`tests/unit/test_reference_resolver.py`、`tests/unit/test_multi_turn_workflow.py`、`tests/integration/test_chat_api.py`、`tests/live/test_live_shopping_flow.py` |
 | 多商品对比决策 | 已完成 | [features/multi-product-comparison.md](features/multi-product-comparison.md) | `src/shop_agent/models/comparison.py`、`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/models/state.py`、`src/shop_agent/services/ports.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py`、`src/shop_agent/api/dependencies.py`、`tests/unit/test_comparison_models.py`、`tests/unit/test_product_comparison_workflow.py`、`tests/unit/test_model_gateways.py`、`tests/integration/test_chat_api.py`、`tests/live/test_live_shopping_flow.py` |
+| Agent 主动需求澄清 | 开发中 | [features/proactive-requirement-clarification.md](features/proactive-requirement-clarification.md) | `src/shop_agent/services/proactive_clarification.py`、`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py` |
 
 ## 更新规则
 

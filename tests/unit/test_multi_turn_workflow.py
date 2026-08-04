@@ -24,6 +24,10 @@ from shop_agent.models.turn_query import (
     ReferenceCandidateMatch,
     TurnQuery,
 )
+from shop_agent.services.conversation_repository import (
+    ConversationRepository,
+    SqliteConversationRepository,
+)
 from shop_agent.services.multi_turn_query_compiler import merge_turn_query
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
@@ -182,7 +186,7 @@ def _dependencies(
 def _workflow_dependencies(
     harness: Any,
     parser: FakeTurnQueryParser,
-    repository: FakeConversationRepository,
+    repository: ConversationRepository,
 ) -> WorkflowDependencies:
     return WorkflowDependencies(
         turn_query_parser=parser,
@@ -4108,3 +4112,281 @@ def test_workflow_node_routes_are_deterministic() -> None:
     assert route_pending_action(with_pending) == "resume_pending_action"
     assert route_resumed_action(question) == "resolve_reference"
     assert route_resumed_action({**question, "response_text": "取消"}) == "end"
+
+
+def _smartphone_harness(tmp_path: Path, *, product_count: int) -> Any:
+    return build_harness(
+        tmp_path,
+        product_count=product_count,
+        product_pairs=[("数码电子", "智能手机")] * product_count,
+    )
+
+
+def _smartphone_turn(*, skip: bool = False) -> TurnQuery:
+    return TurnQuery(
+        schema_version=1,
+        intent="new_search",
+        category_reference=CategoryReference(
+            surface_text="手机",
+            candidates=[
+                CategoryCandidate(category="数码电子", sub_category="智能手机")
+            ],
+        ),
+        skip_preference_question=skip,
+    )
+
+
+@pytest.mark.asyncio
+async def test_proactive_question_is_persisted_before_text_and_skips_retrieval(
+    tmp_path: Path,
+) -> None:
+    harness = _smartphone_harness(tmp_path, product_count=4)
+    parser = FakeTurnQueryParser([_smartphone_turn()])
+    events: list[dict[str, Any]] = []
+
+    async for part in build_graph(
+        _workflow_dependencies(harness, parser, harness.repository)
+    ).astream(initial_state("推荐一款手机"), stream_mode="custom", version="v2"):
+        assert harness.repository.record is not None
+        assert harness.repository.record.state.pending_clarification is not None
+        events.append(part)
+
+    assert [part["data"]["event"] for part in events] == ["text_delta"]
+    assert events[0]["data"]["data"]["delta"] == (
+        "你更看重拍照、续航、性能还是性价比？也可以补充预算。"
+    )
+    assert harness.repository.record is not None
+    pending = harness.repository.record.state.pending_clarification
+    assert pending is not None
+    assert pending.kind == "missing_preferences"
+    assert pending.suspended_turn_query.intent == "new_search"
+    assert harness.retrieval.retrieve_calls == []
+    assert harness.retrieval.aggregate_calls == []
+    assert harness.retrieval.rerank_calls == []
+    assert harness.evidence.validate_calls == []
+    assert harness.evidence.select_calls == []
+    assert harness.response.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("product_count", "pair"),
+    [
+        (3, ("数码电子", "智能手机")),
+        (4, ("数码电子", "蓝牙耳机")),
+    ],
+)
+async def test_small_or_unapproved_catalog_scope_searches_without_question(
+    tmp_path: Path,
+    product_count: int,
+    pair: tuple[str, str],
+) -> None:
+    harness = build_harness(
+        tmp_path,
+        product_count=product_count,
+        product_pairs=[pair] * product_count,
+    )
+    turn = TurnQuery(
+        schema_version=1,
+        intent="new_search",
+        category_reference=CategoryReference(
+            surface_text=pair[1],
+            candidates=[CategoryCandidate(category=pair[0], sub_category=pair[1])],
+        ),
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser([turn]),
+            harness.repository,
+        ),
+        f"推荐{pair[1]}",
+    )
+
+    assert any(part["data"]["event"] == "product" for part in events)
+    assert len(harness.retrieval.retrieve_calls) == 1
+    assert harness.repository.record is not None
+    assert harness.repository.record.state.pending_clarification is None
+
+
+@pytest.mark.asyncio
+async def test_existing_preference_or_explicit_skip_searches_immediately(
+    tmp_path: Path,
+) -> None:
+    turns = (
+        _smartphone_turn(skip=True),
+        TurnQuery(
+            schema_version=1,
+            intent="new_search",
+            category_reference=_smartphone_turn().category_reference,
+            semantic_term_operations=[
+                {"operation": "prioritize", "value": "拍照优先"}
+            ],
+        ),
+    )
+    for index, turn in enumerate(turns):
+        harness = _smartphone_harness(tmp_path / str(index), product_count=4)
+
+        events = await _drain_graph(
+            _workflow_dependencies(
+                harness,
+                FakeTurnQueryParser([turn]),
+                harness.repository,
+            ),
+            "直接推荐手机" if index == 0 else "推荐拍照好的手机",
+        )
+
+        assert any(part["data"]["event"] == "product" for part in events)
+        assert len(harness.retrieval.retrieve_calls) == 1
+        assert harness.repository.record is not None
+        assert harness.repository.record.state.pending_clarification is None
+
+
+@pytest.mark.asyncio
+async def test_preference_answer_reuses_existing_soft_and_hard_constraint_flow(
+    tmp_path: Path,
+) -> None:
+    harness = _smartphone_harness(tmp_path, product_count=4)
+    await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser([_smartphone_turn()]),
+            harness.repository,
+        ),
+        "推荐一款手机",
+    )
+    answer = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "clarification_answer",
+            "semantic_term_operations": [
+                {"operation": "prioritize", "value": "拍照优先"}
+            ],
+            "slot_operations": [
+                {
+                    "slot": "constraints.max_price",
+                    "operation": "replace",
+                    "value": 4000,
+                }
+            ],
+        }
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser([answer]),
+            harness.repository,
+        ),
+        "拍照优先，预算 4000",
+    )
+
+    assert any(part["data"]["event"] == "product" for part in events)
+    assert harness.repository.record is not None
+    state = harness.repository.record.state
+    assert state.pending_clarification is None
+    assert state.query_snapshot is not None
+    assert state.query_snapshot.semantic_terms == ["拍照优先"]
+    assert state.query_snapshot.constraints.max_price == 4000
+    assert len(harness.retrieval.retrieve_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip", [False, True])
+async def test_empty_or_skip_answer_searches_without_second_question(
+    tmp_path: Path,
+    skip: bool,
+) -> None:
+    harness = _smartphone_harness(tmp_path, product_count=4)
+    await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser([_smartphone_turn()]),
+            harness.repository,
+        ),
+        "推荐一款手机",
+    )
+    answer = TurnQuery(
+        schema_version=1,
+        intent="clarification_answer",
+        skip_preference_question=skip,
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(
+            harness,
+            FakeTurnQueryParser([answer]),
+            harness.repository,
+        ),
+        "先看看" if skip else "都可以",
+    )
+
+    assert sum(part["data"]["event"] == "text_delta" for part in events) == 2
+    assert any(part["data"]["event"] == "product" for part in events)
+    assert harness.repository.record is not None
+    assert harness.repository.record.state.pending_clarification is None
+    assert harness.repository.record.state.query_snapshot is not None
+    assert harness.repository.record.state.query_snapshot.semantic_terms == []
+    assert len(harness.retrieval.retrieve_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_preference_pending_recovers_after_sqlite_repository_rebuild(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "conversation.sqlite3"
+    first_harness = _smartphone_harness(tmp_path / "first", product_count=4)
+    first_repository = SqliteConversationRepository(database_path)
+
+    await _drain_graph(
+        _workflow_dependencies(
+            first_harness,
+            FakeTurnQueryParser([_smartphone_turn()]),
+            first_repository,
+        ),
+        "推荐一款手机",
+    )
+
+    stored = await first_repository.load("conversation-fixed")
+    assert stored is not None
+    assert stored.state.pending_clarification is not None
+    assert stored.state.pending_clarification.kind == "missing_preferences"
+
+    second_harness = _smartphone_harness(tmp_path / "second", product_count=4)
+    rebuilt_repository = SqliteConversationRepository(database_path)
+    answer = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "clarification_answer",
+            "semantic_term_operations": [
+                {"operation": "prioritize", "value": "拍照优先"}
+            ],
+            "slot_operations": [
+                {
+                    "slot": "constraints.max_price",
+                    "operation": "replace",
+                    "value": 4000,
+                }
+            ],
+        }
+    )
+
+    events = await _drain_graph(
+        _workflow_dependencies(
+            second_harness,
+            FakeTurnQueryParser([answer]),
+            rebuilt_repository,
+        ),
+        "拍照优先，预算 4000",
+    )
+
+    assert any(part["data"]["event"] == "product" for part in events)
+    restored = await rebuilt_repository.load("conversation-fixed")
+    assert restored is not None
+    assert restored.state.pending_clarification is None
+    assert restored.state.query_snapshot is not None
+    assert restored.state.query_snapshot.category == "数码电子"
+    assert restored.state.query_snapshot.sub_category == "智能手机"
+    assert restored.state.query_snapshot.semantic_terms == ["拍照优先"]
+    assert restored.state.query_snapshot.constraints.max_price == 4000

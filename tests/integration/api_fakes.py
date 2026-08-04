@@ -393,6 +393,7 @@ def compiled_chat_dependencies(
     parser: TurnQueryParser | None = None,
     repository: ConversationRepository | None = None,
     response_generator: DeterministicResponseGenerator | SequencedResponseGenerator | None = None,
+    catalog_override: ProductCatalog | None = None,
 ) -> tuple[
     ApiDependencies,
     SequencedTurnQueryParser,
@@ -400,7 +401,7 @@ def compiled_chat_dependencies(
     DeterministicRetrievalService,
     DeterministicEvidenceService,
 ]:
-    catalog = _catalog(tmp_path)
+    catalog = catalog_override or _catalog(tmp_path)
     settings = Settings(
         dashscope_api_key="test-key",
         dataset_root=tmp_path,
@@ -439,15 +440,21 @@ def compiled_chat_dependencies(
     )
 
 
-def _catalog(root: Path) -> ProductCatalog:
+def _catalog(
+    root: Path,
+    *,
+    product_count: int = 3,
+    category: str = "数码电子",
+    sub_category: str = "蓝牙耳机",
+) -> ProductCatalog:
     products = [
         Product.model_validate(
             {
                 "product_id": f"p{index}",
                 "title": f"测试蓝牙耳机 {index}",
                 "brand": f"测试品牌 {index}",
-                "category": "数码电子",
-                "sub_category": "蓝牙耳机",
+                "category": category,
+                "sub_category": sub_category,
                 "base_price": 200.0 + index,
                 "image_path": f"images/p{index}.jpg",
                 "skus": [
@@ -464,7 +471,7 @@ def _catalog(root: Path) -> ProductCatalog:
                 },
             }
         )
-        for index in range(1, 4)
+        for index in range(1, product_count + 1)
     ]
     return ProductCatalog(
         root,

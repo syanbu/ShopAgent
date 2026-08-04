@@ -10,6 +10,7 @@ from shop_agent.workflow.nodes import (
     route_comparison_resolution,
     route_pending_action,
     route_product_question,
+    route_proactive_clarification,
     route_reference_resolution,
     route_resumed_action,
     route_retrieval,
@@ -49,6 +50,10 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         nodes.emit_comparison_response,
     )
     builder.add_node("merge_query_snapshot", nodes.merge_query_snapshot)
+    builder.add_node(
+        "decide_proactive_clarification",
+        nodes.decide_proactive_clarification,
+    )
     builder.add_node("compile_effective_query", nodes.compile_effective_query)
     builder.add_node("retrieve_chunks", nodes.retrieve_chunks)
     builder.add_node("aggregate_products", nodes.aggregate_products)
@@ -124,8 +129,16 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         "merge_query_snapshot",
         route_compilation,
         {
-            "compiled": "compile_effective_query",
+            "compiled": "decide_proactive_clarification",
             "needs_clarification": "persist_clarification",
+        },
+    )
+    builder.add_conditional_edges(
+        "decide_proactive_clarification",
+        route_proactive_clarification,
+        {
+            "ask": "persist_clarification",
+            "continue": "compile_effective_query",
         },
     )
     builder.add_conditional_edges(

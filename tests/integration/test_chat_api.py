@@ -11,10 +11,12 @@ from shop_agent.api.dependencies import ApiDependencies
 from shop_agent.catalog import ProductCatalog
 from shop_agent.config import Settings
 from shop_agent.errors import ServiceError
+from shop_agent.models.query import SearchConstraints
 from shop_agent.models.retrieval import EvidenceChunk
 from shop_agent.models.turn_query import TurnQuery
 from shop_agent.services.conversation_repository import SqliteConversationRepository
 from tests.integration.api_fakes import (
+    _catalog,
     FakeGraph,
     FakeReadinessProbe,
     FailingConversationRepository,
@@ -1116,6 +1118,186 @@ async def test_compiled_graph_product_knowledge_error_ends_without_product_or_te
     assert events[-1].data["status"] == "failed"
     assert "upstream-model-secret" not in failed.text
     assert "SELECT private_chunk" not in failed.text
+
+
+def _phone_search_turn(*, skip: bool = False) -> TurnQuery:
+    return TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "new_search",
+            "category_reference": {
+                "surface_text": "手机",
+                "candidates": [
+                    {"category": "数码电子", "sub_category": "智能手机"}
+                ],
+            },
+            "skip_preference_question": skip,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_proactively_asks_then_restores_preference_search(
+    tmp_path: Path,
+) -> None:
+    answer = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": "clarification_answer",
+            "semantic_term_operations": [
+                {"operation": "prioritize", "value": "拍照优先"}
+            ],
+            "slot_operations": [
+                {
+                    "slot": "constraints.max_price",
+                    "operation": "replace",
+                    "value": 4000,
+                }
+            ],
+        }
+    )
+    catalog = _catalog(
+        tmp_path,
+        product_count=4,
+        sub_category="智能手机",
+    )
+    dependencies, parser, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=[_phone_search_turn(), answer],
+        catalog_override=catalog,
+    )
+
+    first = await _post(
+        dependencies,
+        {"conversation_id": "proactive-phone", "message": "推荐一款手机"},
+    )
+
+    first_events = parse_sse(first.text)
+    assert [event.name for event in first_events] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert first_events[1].data["delta"] == (
+        "你更看重拍照、续航、性能还是性价比？也可以补充预算。"
+    )
+    assert retrieval.calls == []
+    saved = await repository.load("proactive-phone")
+    assert saved is not None
+    assert saved.state.pending_clarification is not None
+    assert saved.state.pending_clarification.kind == "missing_preferences"
+
+    second = await _post(
+        dependencies,
+        {
+            "conversation_id": "proactive-phone",
+            "message": "拍照优先，预算 4000",
+        },
+    )
+
+    second_events = parse_sse(second.text)
+    assert [event.name for event in second_events] == [
+        "message_start",
+        "product",
+        "product",
+        "product",
+        "text_delta",
+        "message_end",
+    ]
+    restored = await repository.load("proactive-phone")
+    assert restored is not None
+    assert restored.state.pending_clarification is None
+    assert restored.state.query_snapshot is not None
+    assert restored.state.query_snapshot.semantic_terms == ["拍照优先"]
+    assert restored.state.query_snapshot.constraints.max_price == 4000
+    assert parser.contexts[1].pending_clarification is not None
+    assert parser.contexts[1].pending_clarification.kind == "missing_preferences"
+    assert len(retrieval.calls) == 1
+    assert retrieval.calls[0].max_price == 4000
+
+
+@pytest.mark.asyncio
+async def test_compiled_http_skip_answer_resumes_without_fake_preferences(
+    tmp_path: Path,
+) -> None:
+    skip_answer = TurnQuery(
+        schema_version=1,
+        intent="clarification_answer",
+        skip_preference_question=True,
+    )
+    catalog = _catalog(
+        tmp_path,
+        product_count=4,
+        sub_category="智能手机",
+    )
+    dependencies, _, repository, retrieval, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=[_phone_search_turn(), skip_answer],
+        catalog_override=catalog,
+    )
+
+    first = await _post(
+        dependencies,
+        {"conversation_id": "proactive-skip", "message": "推荐一款手机"},
+    )
+    second = await _post(
+        dependencies,
+        {"conversation_id": "proactive-skip", "message": "先看看"},
+    )
+
+    assert [event.name for event in parse_sse(first.text)] == [
+        "message_start",
+        "text_delta",
+        "message_end",
+    ]
+    assert "product" in [event.name for event in parse_sse(second.text)]
+    restored = await repository.load("proactive-skip")
+    assert restored is not None
+    assert restored.state.pending_clarification is None
+    assert restored.state.query_snapshot is not None
+    assert restored.state.query_snapshot.semantic_terms == []
+    assert restored.state.query_snapshot.constraints == SearchConstraints()
+    assert len(retrieval.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("product_count", "skip"),
+    [(4, True), (3, False)],
+)
+async def test_compiled_http_explicit_skip_or_small_catalog_returns_products(
+    tmp_path: Path,
+    product_count: int,
+    skip: bool,
+) -> None:
+    case_path = tmp_path / f"{product_count}-{skip}"
+    catalog = _catalog(
+        case_path,
+        product_count=product_count,
+        sub_category="智能手机",
+    )
+    dependencies, _, repository, retrieval, _ = compiled_chat_dependencies(
+        case_path,
+        turns=[_phone_search_turn(skip=skip)],
+        catalog_override=catalog,
+    )
+
+    response = await _post(
+        dependencies,
+        {
+            "conversation_id": f"direct-{product_count}-{skip}",
+            "message": "直接推荐手机" if skip else "推荐手机",
+        },
+    )
+
+    names = [event.name for event in parse_sse(response.text)]
+    assert "product" in names
+    assert names[0] == "message_start"
+    assert names[-1] == "message_end"
+    assert len(retrieval.calls) == 1
+    saved = await repository.load(f"direct-{product_count}-{skip}")
+    assert saved is not None
+    assert saved.state.pending_clarification is None
 
 
 @pytest.mark.asyncio

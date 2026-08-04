@@ -153,6 +153,25 @@ def _turn_context() -> TurnContext:
     )
 
 
+def _preference_context() -> TurnContext:
+    suspended = TurnQuery(
+        schema_version=1,
+        intent="new_search",
+        category_reference={
+            "surface_text": "手机",
+            "candidates": [
+                {"category": "数码电子", "sub_category": "智能手机"}
+            ],
+        },
+    )
+    return TurnContext(
+        pending_clarification=PendingClarification(
+            kind="missing_preferences",
+            suspended_turn_query=suspended,
+        )
+    )
+
+
 def _turn_parser(
     settings: Settings,
     client: SimpleNamespace,
@@ -304,12 +323,121 @@ def test_turn_query_prompt_contains_schema_taxonomy_and_complete_contract() -> N
     assert "最贵的呢" in prompt
     assert "field=sku" in prompt
     assert "不得映射为 price_preference" in prompt
+    assert "skip_preference_question" in prompt
+    assert "missing_preferences" in prompt
+    assert "拍照优先" in prompt
+    assert "先看看" in prompt
+    assert "不得输出问题文本、问题 ID" in prompt
     assert (
         '"input":"最贵的呢","output":{"schema_version":1,'
         '"intent":"product_question","reference":null,'
         '"product_question":{"text":"最贵的呢","kind":"structured",'
         '"field":"sku"}}'
     ) in prompt
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_accepts_explicit_initial_preference_skip(
+    settings: Settings,
+) -> None:
+    response = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "new_search",
+                "category_reference": {
+                    "surface_text": "手机",
+                    "candidates": [
+                        {"category": "数码电子", "sub_category": "智能手机"}
+                    ],
+                },
+                "skip_preference_question": True,
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(return_value=response)
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _turn_parser(settings, client).parse(
+        "直接推荐几款手机",
+        TurnContext(),
+    )
+
+    assert result.intent == "new_search"
+    assert result.skip_preference_question is True
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_maps_preference_answer_to_existing_operations(
+    settings: Settings,
+) -> None:
+    response = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "clarification_answer",
+                "semantic_term_operations": [
+                    {"operation": "prioritize", "value": "拍照优先"}
+                ],
+                "slot_operations": [
+                    {
+                        "slot": "constraints.max_price",
+                        "operation": "replace",
+                        "value": 4000,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(return_value=response)
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _turn_parser(settings, client).parse(
+        "拍照优先，预算 4000",
+        _preference_context(),
+    )
+
+    assert result.intent == "clarification_answer"
+    assert result.semantic_term_operations[0].value == "拍照优先"
+    assert result.slot_operations[0].slot == "constraints.max_price"
+    assert result.slot_operations[0].value == 4000
+    assert result.skip_preference_question is False
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_accepts_preference_question_skip_answer(
+    settings: Settings,
+) -> None:
+    response = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "clarification_answer",
+                "skip_preference_question": True,
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(return_value=response)
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _turn_parser(settings, client).parse(
+        "先看看",
+        _preference_context(),
+    )
+
+    assert result.intent == "clarification_answer"
+    assert result.skip_preference_question is True
+    assert result.semantic_term_operations == []
+    assert result.slot_operations == []
 
 
 @pytest.mark.asyncio

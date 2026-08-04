@@ -521,3 +521,70 @@ def test_turn_query_rejects_conflicting_slot_operations() -> None:
                 },
             ],
         )
+
+
+def test_turn_query_defaults_preference_question_skip_to_false() -> None:
+    query = TurnQuery(schema_version=1, intent="new_search")
+
+    assert query.skip_preference_question is False
+
+
+@pytest.mark.parametrize(
+    "intent",
+    ["new_search", "switch_category", "clarification_answer"],
+)
+def test_turn_query_allows_preference_question_skip_on_supported_intents(
+    intent: str,
+) -> None:
+    query = TurnQuery.model_validate(
+        {
+            "schema_version": 1,
+            "intent": intent,
+            "skip_preference_question": True,
+        }
+    )
+
+    assert query.skip_preference_question is True
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "refine_search",
+        "more_results",
+        "product_question",
+        "product_comparison",
+        "non_shopping",
+    ],
+)
+def test_turn_query_rejects_preference_question_skip_on_other_intents(
+    intent: str,
+) -> None:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "intent": intent,
+        "skip_preference_question": True,
+    }
+    if intent == "product_question":
+        payload["product_question"] = {
+            "text": "怎么样",
+            "kind": "semantic",
+        }
+    if intent == "product_comparison":
+        payload["product_comparison"] = {
+            "question": "这两个哪个好",
+            "surface_text": "这两个",
+        }
+
+    with pytest.raises(ValidationError, match="skip_preference_question"):
+        TurnQuery.model_validate(payload)
+
+
+def test_turn_query_rejects_skip_and_cancel_together() -> None:
+    with pytest.raises(ValidationError, match="cannot coexist"):
+        TurnQuery(
+            schema_version=1,
+            intent="clarification_answer",
+            skip_preference_question=True,
+            cancel_pending=True,
+        )

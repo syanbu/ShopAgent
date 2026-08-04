@@ -77,6 +77,7 @@ class PendingClarification(BaseModel):
         "condition_conflict",
         "ambiguous_comparison_targets",
         "missing_comparison_dimension",
+        "missing_preferences",
     ]
     candidate_product_ids: tuple[str, ...] = ()
     candidate_category_scopes: tuple[CategoryCandidate, ...] = ()

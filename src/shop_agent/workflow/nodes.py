@@ -37,6 +37,9 @@ from shop_agent.services.multi_turn_query_compiler import (
     merge_turn_query,
 )
 from shop_agent.services.ports import TurnContext, TurnQueryParser
+from shop_agent.services.proactive_clarification import (
+    decide_proactive_clarification as decide_proactive_clarification_service,
+)
 from shop_agent.services.query_compiler import compile_effective_query
 from shop_agent.services.reference_resolver import (
     CategoryResolution,
@@ -54,6 +57,7 @@ _UNICODE_LINE_SEPARATOR_ESCAPES = {
     0x2029: "\\u2029",
 }
 CompilationRoute = Literal["compiled", "needs_clarification"]
+ProactiveClarificationRoute = Literal["ask", "continue"]
 RetrievalRoute = Literal["has_results", "no_results"]
 ValidationRoute = Literal["has_candidates", "no_candidates"]
 SelectionRoute = Literal["has_products", "no_products"]
@@ -312,6 +316,11 @@ class WorkflowNodes:
             return {
                 "conversation_state": cleared,
                 "turn_query": restored,
+                **(
+                    {"skip_proactive_clarification": True}
+                    if pending.kind == "missing_preferences"
+                    else {}
+                ),
                 **(
                     {
                         "allowed_category_scopes": (
@@ -776,6 +785,40 @@ class WorkflowNodes:
             "result_strategy": result.result_strategy,
             "parsed_intent": result.parsed_intent,
             "response_mode": "shopping",
+        }
+
+    async def decide_proactive_clarification(
+        self,
+        state: ShoppingState,
+    ) -> dict[str, object]:
+        decision = decide_proactive_clarification_service(
+            catalog=self.dependencies.catalog,
+            snapshot=state["query_snapshot"],
+            search_intent=state["search_intent"],
+            final_product_limit=self.dependencies.settings.final_product_limit,
+            skip_preference_question=(
+                state["turn_query"].skip_preference_question
+                or state.get("skip_proactive_clarification", False)
+            ),
+        )
+        if not decision.should_ask:
+            return {}
+        if decision.message is None:
+            raise RuntimeError("proactive clarification ask requires a message")
+
+        conversation = state["conversation_state"]
+        pending = PendingClarification(
+            kind="missing_preferences",
+            suspended_turn_query=state["turn_query"].model_copy(deep=True),
+        )
+        clarification_state = conversation.model_copy(
+            update={"pending_clarification": pending},
+            deep=True,
+        )
+        return {
+            "conversation_state": clarification_state,
+            "clarification_message": decision.message,
+            "response_mode": "clarification",
         }
 
     async def retrieve_chunks(self, state: ShoppingState) -> dict[str, object]:
@@ -1259,6 +1302,16 @@ def route_compilation(state: ShoppingState) -> CompilationRoute:
     )
 
 
+def route_proactive_clarification(
+    state: ShoppingState,
+) -> ProactiveClarificationRoute:
+    return (
+        "ask"
+        if state.get("response_mode") == "clarification"
+        else "continue"
+    )
+
+
 def route_retrieval(state: ShoppingState) -> RetrievalRoute:
     return "has_results" if state["retrieved_chunks"] else "no_results"
 
@@ -1526,6 +1579,8 @@ def _merge_pending_turn(
         ),
         "cancel_pending": False,
     }
+    if pending.kind == "missing_preferences":
+        update["skip_preference_question"] = answer.skip_preference_question
     return TurnQuery.model_validate(
         suspended.model_copy(update=update, deep=True).model_dump()
     )

@@ -312,3 +312,25 @@ def test_conversation_record_keeps_sql_version_outside_serialized_state() -> Non
 
     assert "version" not in state.model_dump()
     assert record.version == 1
+
+
+def test_missing_preferences_pending_round_trip_preserves_suspended_search() -> None:
+    pending = PendingClarification(
+        kind="missing_preferences",
+        suspended_turn_query=TurnQuery(
+            schema_version=1,
+            intent="new_search",
+            category_reference={
+                "surface_text": "手机",
+                "candidates": [
+                    {"category": "数码电子", "sub_category": "智能手机"}
+                ],
+            },
+        ),
+    )
+
+    restored = PendingClarification.model_validate_json(pending.model_dump_json())
+
+    assert restored == pending
+    assert restored.kind == "missing_preferences"
+    assert restored.suspended_turn_query.intent == "new_search"

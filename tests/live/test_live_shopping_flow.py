@@ -12,6 +12,7 @@ from shop_agent.config import Settings
 from shop_agent.models.conversation import (
     CandidateReference,
     ConversationState,
+    PendingClarification,
     QuerySnapshot,
 )
 from shop_agent.models.query import ParsedIntent, SearchConstraints
@@ -406,6 +407,65 @@ async def _assert_live_turn_query_parser_contracts(
         category="数码电子",
         sub_category="智能手机",
     )
+
+    initial_phone = await parser.parse("推荐一款手机", TurnContext())
+    assert initial_phone.intent == "new_search"
+    assert initial_phone.skip_preference_question is False
+    assert initial_phone.category_reference is not None
+    phone_resolution = resolve_category_reference(
+        initial_phone.category_reference,
+        catalog,
+    )
+    assert phone_resolution.outcome == "resolved"
+    assert phone_resolution.scope is not None
+    assert phone_resolution.scope.sub_category == "智能手机"
+
+    preference_context = TurnContext(
+        pending_clarification=PendingClarification(
+            kind="missing_preferences",
+            suspended_turn_query=initial_phone,
+        )
+    )
+    preference_answer = await parser.parse(
+        "拍照优先，预算 4000",
+        preference_context,
+    )
+    assert preference_answer.intent == "clarification_answer"
+    assert any(
+        operation.operation in {"add", "prioritize"}
+        and operation.value is not None
+        and "拍照" in operation.value
+        for operation in preference_answer.semantic_term_operations
+    )
+    assert any(
+        operation.slot == "constraints.max_price"
+        and operation.operation == "replace"
+        and operation.value == 4000
+        for operation in preference_answer.slot_operations
+    )
+
+    skip_answer = await parser.parse("先看看", preference_context)
+    assert skip_answer.intent == "clarification_answer"
+    assert skip_answer.skip_preference_question is True
+    assert skip_answer.semantic_term_operations == []
+    assert skip_answer.slot_operations == []
+
+    running_shoes = await parser.parse("推荐跑步鞋", TurnContext())
+    assert running_shoes.category_reference is not None
+    running_resolution = resolve_category_reference(
+        running_shoes.category_reference,
+        catalog,
+    )
+    assert running_resolution.outcome == "resolved"
+    assert running_resolution.scope is not None
+    assert running_resolution.scope.sub_category == "跑步鞋"
+
+    direct_earphones = await parser.parse(
+        "直接推荐几款真无线耳机",
+        TurnContext(),
+    )
+    assert direct_earphones.intent == "new_search"
+    assert direct_earphones.skip_preference_question is True
 
 async def _chat(client: httpx.AsyncClient, message: str) -> list[ParsedSseEvent]:
     response = await client.post("/api/v1/chat/stream", json={"message": message})

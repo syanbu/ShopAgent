@@ -314,6 +314,15 @@ def _build_turn_query_system_prompt(
         "换一批；product_question 表示询问一个候选商品；product_comparison 表示"
         "比较最近候选中的两到三款商品；clarification_answer 表示回答当前待澄清"
         "问题；non_shopping 表示非购物输入。\n"
+        "主动需求澄清规则：skip_preference_question 只表示用户明确要求直接查看结果、"
+        "不回答偏好问题。首次 new_search 或 switch_category 中出现‘直接推荐’"
+        "‘先看看’‘随便推荐’‘不用问’等明确表达时设为 true；普通品类搜索保持 false。"
+        "pending_clarification.kind 为 missing_preferences 时，用户补充偏好或预算使用 "
+        "clarification_answer：‘拍照优先’等普通倾向继续写入 semantic_term_operations，"
+        "‘预算 4000’使用 slot_operations replace constraints.max_price=4000。"
+        "用户回答‘先看看’‘不用问’时使用 clarification_answer 并只设置 "
+        "skip_preference_question=true，不得生成虚假偏好。模型不得输出问题文本、问题 ID "
+        "或自行生成澄清问题。skip_preference_question 与 cancel_pending 不得同时为 true。\n"
         "指代规则：reference 只提取 ordinal、demonstrative、brand 或 product_name "
         "线索。不得输出可信 product_id，不得自行选择或解析候选 ID；确定性代码稍后"
         "解析。recent_candidates 是唯一可引用的最近一轮候选域，更早结果不可用。"
@@ -750,6 +759,17 @@ class DashScopeTurnQueryParser(_DashScopeChatGateway):
         message: str,
     ) -> TurnQuery:
         parsed = TurnQuery.model_validate_json(content)
+        if (
+            parsed.skip_preference_question
+            and parsed.intent == "clarification_answer"
+            and (
+                context.pending_clarification is None
+                or context.pending_clarification.kind != "missing_preferences"
+            )
+        ):
+            raise ValueError(
+                "clarification skip requires missing_preferences pending context"
+            )
         reference = parsed.reference
         if reference is not None:
             surface_text = reference.surface_text.strip()
