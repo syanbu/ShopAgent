@@ -163,6 +163,9 @@ def _product(
     sub_category: str = "蓝牙耳机",
     low_price: float = 399.0,
     high_price: float = 599.0,
+    marketing_description: str = "测试商品",
+    official_faq: list[dict[str, str]] | None = None,
+    user_reviews: list[dict[str, object]] | None = None,
 ) -> Product:
     return Product.model_validate(
         {
@@ -186,9 +189,9 @@ def _product(
                 },
             ],
             "rag_knowledge": {
-                "marketing_description": "测试商品",
-                "official_faq": [],
-                "user_reviews": [],
+                "marketing_description": marketing_description,
+                "official_faq": official_faq or [],
+                "user_reviews": user_reviews or [],
             },
         }
     )
@@ -289,6 +292,62 @@ async def test_excluded_unknown_feature_keeps_candidate() -> None:
     )
 
     assert validated[0].eligible is True
+
+
+@pytest.mark.asyncio
+async def test_semantic_validation_uses_complete_catalog_evidence() -> None:
+    product = _product(
+        "p1",
+        marketing_description="清爽防晒产品。",
+        official_faq=[
+            {
+                "question": "是否含酒精？",
+                "answer": "配方中含有酒精。",
+            }
+        ],
+        user_reviews=[
+            {
+                "nickname": "测试用户",
+                "rating": 4,
+                "content": "成膜速度很快。",
+            }
+        ],
+    )
+    assessment = EvidenceAssessment(
+        product_id="p1",
+        checks=[
+            EvidenceCheck(
+                condition="excluded:酒精",
+                status="contradicted",
+                evidence_ids=["p1:faq:0"],
+            )
+        ],
+    )
+    mapper = FakeEvidenceMapper({"p1": assessment})
+    service = EvidenceService(catalog=_catalog([product]), mapper=mapper)
+    retrieved_summary_only = _candidate(
+        product,
+        0.8,
+        evidence=[_chunk("p1", "p1:summary", chunk_type="product_summary")],
+    )
+
+    validated = await service.validate_candidates(
+        [retrieved_summary_only],
+        SearchConstraints(excluded_features=["酒精"]),
+    )
+
+    assert [chunk.chunk_id for chunk in mapper.calls[0][2]] == [
+        "p1:summary",
+        "p1:faq:0",
+        "p1:review:0",
+    ]
+    assert [chunk.chunk_id for chunk in validated[0].candidate.evidence] == [
+        "p1:summary",
+        "p1:faq:0",
+        "p1:review:0",
+    ]
+    assert validated[0].eligible is False
+    assert validated[0].rejection_reasons == ["semantic_condition_contradicted"]
 
 
 @pytest.mark.asyncio
@@ -560,19 +619,30 @@ async def test_validate_candidates_checks_catalog_category_brand_and_sku_price()
 async def test_conflicting_text_evidence_is_logged_and_not_selected_as_proof(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    product = _product("p1")
-    evidence = [
-        _chunk("p1", "faq-decisive"),
-        _chunk("p1", "review-conflict", chunk_type="user_review"),
-    ]
+    product = _product(
+        "p1",
+        official_faq=[
+            {
+                "question": "是否防水？",
+                "answer": "支持防水。",
+            }
+        ],
+        user_reviews=[
+            {
+                "nickname": "测试用户",
+                "rating": 2,
+                "content": "实际使用时进水了。",
+            }
+        ],
+    )
     assessment = EvidenceAssessment(
         product_id="p1",
         checks=[
             EvidenceCheck(
                 condition="required:防水",
                 status="supported",
-                evidence_ids=["faq-decisive"],
-                conflicting_evidence_ids=["review-conflict"],
+                evidence_ids=["p1:faq:0"],
+                conflicting_evidence_ids=["p1:review:0"],
             )
         ],
     )
@@ -581,18 +651,18 @@ async def test_conflicting_text_evidence_is_logged_and_not_selected_as_proof(
 
     with caplog.at_level(logging.WARNING):
         validated = await service.validate_candidates(
-            candidates=[_candidate(product, 0.8, evidence=evidence)],
+            candidates=[_candidate(product, 0.8)],
             constraints=SearchConstraints(required_features=["防水"]),
         )
 
     assert "catalog_evidence_conflict" in caplog.text
-    assert validated[0].assessment.checks[0].evidence_ids == ["faq-decisive"]
+    assert validated[0].assessment.checks[0].evidence_ids == ["p1:faq:0"]
     selected = service.select_candidates(
         validated,
         limit=3,
         constraints=SearchConstraints(required_features=["防水"]),
     )
-    assert selected[0].evidence_ids == ["faq-decisive"]
+    assert selected[0].evidence_ids == ["p1:faq:0"]
 
 
 @pytest.mark.asyncio

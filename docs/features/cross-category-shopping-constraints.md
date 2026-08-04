@@ -2,7 +2,7 @@
 
 > 状态：已完成
 >
-> 代码入口：`src/shop_agent/models/query.py`、`src/shop_agent/sku_attributes.py`、`src/shop_agent/catalog.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/evidence.py`、`src/shop_agent/workflow/`
+> 代码入口：`src/shop_agent/models/query.py`、`src/shop_agent/sku_attributes.py`、`src/shop_agent/catalog.py`、`src/shop_agent/chunking.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/evidence.py`、`src/shop_agent/workflow/`
 
 ## 功能目标
 
@@ -26,6 +26,7 @@
 - 每个 `category + sub_category` 可用 SKU 属性及取值的目录视图。
 - 价格条件与 SKU 条件在同一个 SKU 上的联合匹配。
 - 语义特征的 `supported`、`unknown`、`contradicted` 三态验证语义。
+- 候选商品确定后按 `product_id` 从 Catalog 重建完整 summary、FAQ 和评论证据，再执行语义三态验证。
 - 将匹配 SKU 传递给商品卡片价格计算和候选决策。
 
 本功能暂不包含：
@@ -74,6 +75,7 @@
        -> 在同一个 SKU 上联合应用价格和 sku_constraints
        -> 保存 matched_skus
        -> matched_skus 为空时淘汰商品
+  -> 按候选 product_id 从 Catalog 重建完整商品证据
   -> 验证 required_features / excluded_features
        -> supported：明确满足条件
        -> unknown：证据不足，保留候选
@@ -275,6 +277,12 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 
 用户表达的条件应完整保留。意图阶段不能因为商品目录可能没有对应证据而删除 feature；证据验证阶段负责产生三态结果。
 
+向量召回中的 Chunk 只负责发现和重排候选商品，不作为语义硬约束的完整事实边界。候选
+完成重排后，`EvidenceService` 按 `product_id` 从内存 `ProductCatalog` 读取完整
+`Product`，并复用 `build_product_chunks` 重建 summary、全部官方问答和全部用户评论。
+证据模型因此不受普通向量召回“每商品最多五个 Chunk”的截断影响。重建后的 Chunk ID、
+文本和来源路径与索引阶段一致；Catalog 中没有说明的条件仍按 `unknown` 乐观保留。
+
 证据模型通过强制 Function Calling 返回三态结果。应用为每个候选注册无副作用的 `submit_evidence_assessment` 工具，并使用扁平 JSON Schema 约束 `product_id`、`checks[].condition`、`status` 和证据 ID 数组。模型返回的 `tool_calls[0].function.arguments` 仍需经过严格 Pydantic 校验和 condition ID 精确覆盖校验；首次工具调用缺失、字段非法或条件覆盖错误时，进入现有的一次自动纠错。
 
 一轮请求对重排后的候选分别调用证据模型，调用次数不因并发而减少；服务使用当前
@@ -302,6 +310,16 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 ### 不把所有用户表达都预定义为 feature 枚举
 
 `required_features` 和 `excluded_features` 保持开放文本，以承载“适合通勤”“不甜腻”“穿着不贴身”等跨品类自然语言需求。开放文本只影响条件表达，不降低事实要求；商品是否满足仍必须由原始 JSON 证据判断。
+
+### 候选召回与完整证据校验分离
+
+Qdrant 的向量相似度用于找到与商品类型和正向需求相关的候选，并为商品重排提供紧凑
+文本；它不负责证明候选满足全部语义硬约束。候选 `product_id` 确定后，语义校验统一以
+Catalog 中的完整商品 JSON 为事实源，确定性重建全部文本 Chunk。这样负向条件不需要
+加入主向量查询，也不会因为相关 Chunk 未进入向量 Top-K 而错误降级为 `unknown`。
+
+该决策不改变三态准入规则，也不新增存储或网络调用。代价是每个候选的证据模型输入
+可能增加；候选上限、每候选一次模型调用和请求内并发上限保持不变。
 
 ### 证据三态校验使用独立低延迟模型
 
@@ -336,8 +354,9 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 - `src/shop_agent/models/query.py`：分层约束、SKU 约束和数值约束模型。
 - `src/shop_agent/sku_attributes.py`：59种原始 key 的规范映射、taxonomy 和数值单位归一化。
 - `src/shop_agent/catalog.py`：规范属性目录、SKU 规范化视图和同一 SKU 联合匹配。
+- `src/shop_agent/chunking.py`：从 Catalog 商品确定性重建与索引阶段一致的完整文本证据。
 - `src/shop_agent/services/dashscope_chat.py`：向意图模型提供当前子类允许的规范 key 与值；证据模型使用强制 Function Calling，并在自动纠错范围内校验工具参数和 condition ID 完整覆盖。
-- `src/shop_agent/services/evidence.py`：执行结构化硬过滤和语义三态候选准入。
+- `src/shop_agent/services/evidence.py`：按 `product_id` 补全 Catalog 证据，执行结构化硬过滤和语义三态候选准入。
 - `src/shop_agent/workflow/`：在检索、证据验证和候选决策之间传递新约束与匹配 SKU。
 
 已验证行为：
@@ -359,19 +378,21 @@ Catalog 加载原始 JSON 时保留原始 SKU，并构建只读规范化视图�
 - 证据模型遗漏、改写或重复 condition ID 时，第一次响应校验失败并进入现有的一次自动纠错；正常响应仍只调用一次证据模型。
 - 工具参数遗漏 `checks` 或包含 Schema 之外的字段时，严格 Pydantic 校验拒绝该响应。
 - 商品 JSON 没有证据时，模型不能将语义条件判定为 `supported`。
+- 普通向量召回即使只为候选携带一个 Chunk，证据模型仍收到 Catalog 重建的完整 summary、FAQ 和评论，决定性证据 ID 可继续进入候选选择。
 - 原有无 SKU 属性条件的价格检索行为保持兼容。
 
-验证命令与结果：
+2026-08-04 完整 Catalog 证据补全后验证命令与结果：
 
-- `uv run pytest -q -p no:cacheprovider`：458 passed，21 skipped。
+- `uv run pytest -q -p no:cacheprovider`：562 passed，21 skipped。
 - `uv run ruff check .`：通过。
-- `uv run mypy src scripts`：39个源文件通过。
+- `.\.venv\Scripts\python.exe -m mypy src scripts`：41个源文件通过；本次直接使用虚拟环境 Python 是因为 Windows 拒绝启动 `uv.exe`，类型检查本身正常完成。
 - 真实数据专项测试确认4个一级类目、37个子类、112个商品及全部59种原始 SKU key 均可加载和规范化。
 
 ## 变更记录
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
+| 2026-08-04 | 候选重排后从 Catalog 重建完整商品证据再执行语义三态校验 | 避免正向向量查询和每商品五个 Chunk 截断漏掉排除条件的决定性证据，同时保留 unknown 乐观准入 |
 | 2026-07-24 | 创建跨品类约束、SKU 规范化和语义三态设计 | 将新约束能力与已完成的单轮推荐工作流隔离记录，并固定当前已确认的设计边界 |
 | 2026-07-25 | 完成约束模型、taxonomy、同一 SKU 匹配和 unknown 准入 | 实现已确认设计，并记录确定性测试与未通过的外部 Qdrant 验证边界 |
 | 2026-07-25 | 要求 contradicted 携带决定性证据 | 防止证据模型在没有原始商品证据时淘汰候选，并明确冲突证据不能替代决定性证据 |

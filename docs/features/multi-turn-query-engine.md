@@ -476,10 +476,15 @@ payload Filter 和 scroll 读取全部 Chunk，不请求向量。返回独立的
 普通检索接口增加请求级 `excluded_product_ids`，使用 `product_id` 的 `must_not`
 过滤实现换一批排重。该列表不写入 `SearchConstraints`，避免把展示历史误当成用户
 商品约束。稳定细化时，全库检索同样排除任务级 seen，同时按 `product_id` 精确读取
-最近候选的全部 Chunk 并注入同一聚合、重排和证据校验链路；历史保留项不使用普通
-召回“每商品最多 5 条证据”的截断，以免漏掉决定硬约束是否成立的后置证据。若派生
-索引缺少精确 Chunk，或精确读取发生可重试的服务故障，允许用一次普通召回仅补回
-缺失的最近候选证据；不可重试的数据错误仍失败关闭。
+最近候选的全部 Qdrant Chunk 并注入聚合和重排；若派生索引缺少精确 Chunk，或精确
+读取发生可重试的服务故障，允许用一次普通召回仅补回缺失的最近候选材料；不可重试的
+数据错误仍失败关闭。
+
+语义硬约束的最终证据校验不再依赖上述 Qdrant Chunk 是否完整。所有搜索策略完成重排
+后，都由跨品类约束能力按候选 `product_id` 从内存 Catalog 重建完整 summary、FAQ 和
+评论，再判断 `required_features`、`excluded_features` 及未结构化数值条件。多轮引擎
+只负责产生完整查询快照和候选顺序；完整证据准入规则归属
+[跨品类商品约束与 SKU 匹配](cross-category-shopping-constraints.md)。
 
 ## 工作流
 
@@ -656,10 +661,28 @@ TurnQuery 的 taxonomy 后校验同时覆盖槽位品牌和
 | SQLite 重建、隔离、版本冲突和错误归一化 | `tests/unit/test_conversation_repository.py::test_save_new_state_creates_parent_and_survives_repository_recreation`、`test_conversations_remain_isolated`、`test_stale_version_returns_retryable_conversation_conflict`、`test_invalid_persisted_state_is_normalized_without_content_leakage` |
 | 固定商品数据、无失效迁移、v1 无 Redis/MySQL | `tests/unit/test_conversation_repository.py::test_state_json_is_compact_domain_state_without_product_body` 固化只存 ID/领域状态的边界；固定数据和无 Redis/MySQL 是本文“范围”和“关键决策”的显式 v1 限制 |
 | HTTP/SSE 兼容及生成/保存失败顺序 | `tests/integration/test_chat_api.py::test_chat_stream_emits_start_products_text_and_end`、`test_generation_failure_after_products_is_partial`、`test_compiled_http_generation_failure_persists_candidates_for_follow_up_ordinal`、`test_compiled_graph_pre_product_errors_are_safe_over_http`；`tests/unit/test_multi_turn_workflow.py::test_persist_completes_before_first_product_and_exact_display_price_is_saved` |
-| 硬约束稳定保留、完整精确证据、可重试补证据、未展示补位、补位耗尽与任务级 seen | `tests/unit/test_multi_turn_workflow.py::test_hard_tightening_preserves_eligible_order_and_fills_with_unseen`、`test_hard_tightening_returns_fewer_cards_when_unseen_fill_is_exhausted`、`test_stable_refinement_keeps_full_unseen_pool_beyond_aggregate_limit`、`test_stable_refinement_validates_all_exact_evidence_chunks`、`test_stable_refinement_recovers_from_retryable_exact_fetch_failure`；`tests/unit/test_retrieval_service.py::test_aggregate_products_can_preserve_all_exact_product_evidence`；`tests/unit/test_multi_turn_query_compiler.py::test_hard_constraint_tightening_uses_stable_refinement`、`test_hard_constraint_relaxation_uses_full_rerank` |
+| 硬约束稳定保留、Catalog 完整证据、可重试补材料、未展示补位、补位耗尽与任务级 seen | `tests/unit/test_multi_turn_workflow.py::test_hard_tightening_preserves_eligible_order_and_fills_with_unseen`、`test_hard_tightening_returns_fewer_cards_when_unseen_fill_is_exhausted`、`test_stable_refinement_keeps_full_unseen_pool_beyond_aggregate_limit`、`test_stable_refinement_validates_all_exact_evidence_chunks`、`test_stable_refinement_recovers_from_retryable_exact_fetch_failure`；`tests/unit/test_evidence_service.py::test_semantic_validation_uses_complete_catalog_evidence`；`tests/unit/test_retrieval_service.py::test_aggregate_products_can_preserve_all_exact_product_evidence`；`tests/unit/test_multi_turn_query_compiler.py::test_hard_constraint_tightening_uses_stable_refinement`、`test_hard_constraint_relaxation_uses_full_rerank` |
 | 软偏好优先级与近似价格编译 | `tests/unit/test_multi_turn_query_compiler.py::test_soft_preference_prioritize_moves_term_to_front_and_uses_full_rerank`、`test_approximate_price_compiles_deterministic_bounds`、`test_large_finite_approximate_price_compiles_without_decimal_failure`、`test_approximate_price_overflow_becomes_safe_clarification`；`tests/unit/test_turn_query_models.py::test_approximate_price_accepts_default_and_explicit_tolerance`、`test_approximate_price_cannot_coexist_with_other_price_operations`、`test_approximate_price_rejects_non_finite_values` |
 
 ### Fresh 验证
+
+2026-08-04 候选完整 Catalog 证据补全后执行：
+
+```powershell
+uv run pytest -q -p no:cacheprovider
+# 562 passed, 21 skipped in 19.41s
+
+uv run ruff check .
+# All checks passed!
+
+.\.venv\Scripts\python.exe -m mypy src scripts
+# Success: no issues found in 41 source files
+```
+
+21 个跳过项仍全部是显式 opt-in 的 live 测试。本次未运行真实 DashScope 证据判断；
+确定性回归确认普通召回即使仅携带 summary，证据服务仍从 Catalog 重建并传入完整
+summary、FAQ 和评论。mypy 直接使用虚拟环境 Python，是因为 Windows 本轮拒绝启动
+`uv.exe`；类型检查本身正常完成。
 
 2026-07-28 自然语言品类解析接入完成后执行：
 
@@ -780,6 +803,7 @@ taxonomy 稳定性用例尚未完成，不据此声明生产上线验收通过�
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
+| 2026-08-04 | 明确多轮候选重排后复用 Catalog 完整证据准入 | 将 Qdrant 候选材料与语义硬约束事实边界分离，避免新搜索的负向条件因 Chunk 截断漏证据 |
 | 2026-08-04 | 增加 `missing_preferences`、显式跳过和一次性恢复分支 | 在不改变既有软硬约束语义的前提下，为只有类目的宽泛搜索收集一次可选偏好 |
 | 2026-07-30 | 完成多轮 Query 开发审查，保留稳定细化历史项的全部精确证据，并为可重试精确读取故障增加普通召回补证据 | 防止证据截断误留不合格商品，同时避免派生索引暂时不可用导致整轮筛选失败 |
 | 2026-07-30 | 将候选全部被筛选条件淘汰时的固定文案改为“未找到同时满足全部筛选条件的商品” | 避免把价格、品牌或 SKU 不匹配错误描述为商品资料不足 |

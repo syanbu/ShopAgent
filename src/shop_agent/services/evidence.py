@@ -4,6 +4,7 @@ import logging
 from collections.abc import Sequence
 
 from shop_agent.catalog import ProductCatalog
+from shop_agent.chunking import build_product_chunks
 from shop_agent.errors import ServiceError
 from shop_agent.models.query import (
     EvidenceCondition,
@@ -13,6 +14,7 @@ from shop_agent.models.query import (
 from shop_agent.models.retrieval import (
     EvidenceAssessment,
     ProductCandidate,
+    RetrievedChunk,
     SelectedProduct,
     ValidatedCandidate,
 )
@@ -105,24 +107,48 @@ class EvidenceService:
             update={"numeric_constraints": unresolved_numeric}
         )
         conditions = build_evidence_conditions(evidence_constraints)
+        evidence_candidate = candidate
         if conditions and not rejection_reasons:
+            evidence_candidate = self._with_complete_catalog_evidence(candidate)
             async with semaphore:
                 assessment = await self._mapper.map_conditions(
                     product.product_id,
                     conditions,
-                    candidate.evidence,
+                    evidence_candidate.evidence,
                 )
-            self._validate_assessment(candidate, assessment, conditions)
-            self._log_conflicts(candidate, assessment)
+            self._validate_assessment(evidence_candidate, assessment, conditions)
+            self._log_conflicts(evidence_candidate, assessment)
             if not semantic_conditions_allow_candidate(assessment):
                 rejection_reasons.append("semantic_condition_contradicted")
 
         return ValidatedCandidate(
-            candidate=candidate,
+            candidate=evidence_candidate,
             assessment=assessment,
             eligible=not rejection_reasons,
             rejection_reasons=rejection_reasons,
         )
+
+    def _with_complete_catalog_evidence(
+        self,
+        candidate: ProductCandidate,
+    ) -> ProductCandidate:
+        product_id = candidate.product.product_id
+        retrieved_scores = {
+            chunk.chunk_id: chunk.score for chunk in candidate.evidence
+        }
+        evidence = [
+            RetrievedChunk.model_validate(
+                {
+                    **chunk.model_dump(mode="python"),
+                    "score": retrieved_scores.get(chunk.chunk_id, 0.0),
+                }
+            )
+            for chunk in build_product_chunks(
+                self._catalog.get(product_id),
+                self._catalog.source_path(product_id),
+            )
+        ]
+        return candidate.model_copy(update={"evidence": evidence}, deep=True)
 
     def select_candidates(
         self,
