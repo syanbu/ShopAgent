@@ -80,10 +80,15 @@ START
 
 ```text
 message_start
-product * 0..3
+product * 0..3（普通推荐）
 text_delta * 1..N
 message_end
 ```
+
+场景化组合推荐复用完全相同的事件结构，但同一消息内允许 `product * 0..8`；客户端不得
+写死三张卡片，应以 `message_start` 到 `message_end` 作为一套组合的消息边界。具体规则见
+[场景化组合推荐](scenario-combination-recommendation.md)。普通推荐的
+`Settings.final_product_limit=3` 不受该扩展影响。
 
 SSE 响应的 `Content-Type` 为 `text/event-stream`。各事件的数据结构如下：
 

@@ -14,6 +14,8 @@ from shop_agent.workflow.nodes import (
     route_reference_resolution,
     route_resumed_action,
     route_retrieval,
+    route_scenario_bundle,
+    route_scenario_compilation,
     route_selection,
     route_turn,
     route_validation,
@@ -50,6 +52,10 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         nodes.emit_comparison_response,
     )
     builder.add_node("merge_query_snapshot", nodes.merge_query_snapshot)
+    builder.add_node("compile_scenario_snapshot", nodes.compile_scenario_snapshot)
+    builder.add_node("build_scenario_bundle", nodes.build_scenario_bundle)
+    builder.add_node("persist_scenario_result", nodes.persist_scenario_result)
+    builder.add_node("emit_scenario_message", nodes.emit_scenario_message)
     builder.add_node(
         "decide_proactive_clarification",
         nodes.decide_proactive_clarification,
@@ -107,6 +113,7 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         route_turn,
         {
             "search": "merge_query_snapshot",
+            "scenario": "compile_scenario_snapshot",
             "product_question": "load_product_facts",
             "product_comparison": "resolve_comparison_targets",
             "clarification_answer": "generate_response",
@@ -133,6 +140,25 @@ def build_graph(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             "needs_clarification": "persist_clarification",
         },
     )
+    builder.add_conditional_edges(
+        "compile_scenario_snapshot",
+        route_scenario_compilation,
+        {
+            "build": "build_scenario_bundle",
+            "persist_message": "persist_clarification",
+            "emit_message": "emit_scenario_message",
+        },
+    )
+    builder.add_conditional_edges(
+        "build_scenario_bundle",
+        route_scenario_bundle,
+        {
+            "complete": "persist_scenario_result",
+            "incomplete": "emit_scenario_message",
+        },
+    )
+    builder.add_edge("persist_scenario_result", "emit_product_events")
+    builder.add_edge("emit_scenario_message", END)
     builder.add_conditional_edges(
         "decide_proactive_clarification",
         route_proactive_clarification,

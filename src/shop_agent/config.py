@@ -21,8 +21,10 @@ class Settings(BaseSettings):
     retrieval_chunk_limit: int = 30
     rerank_product_limit: int = 10
     final_product_limit: int = Field(default=3, ge=1, le=3)
+    scenario_product_limit: int = Field(default=6, ge=1, le=8)
     model_timeout_seconds: float = 30.0
     qdrant_timeout_seconds: float = 10.0
     dataset_root: Path = Field(default=Path("ecommerce_agent_dataset"))
+    scenario_recipe_path: Path = Field(default=Path("config/scenario_recipes.json"))
     conversation_db_path: Path = Field(default=Path(".data/conversations.sqlite3"))
     public_base_url: str = "http://127.0.0.1:8000"

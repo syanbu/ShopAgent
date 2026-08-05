@@ -39,6 +39,8 @@ from shop_agent.services.retrieval import RetrievalService
 from shop_agent.services.multi_turn_query_compiler import merge_turn_query
 from shop_agent.services.ports import TurnContext
 from shop_agent.services.reference_resolver import resolve_category_reference
+from shop_agent.services.scenario_recommendation import ScenarioRecommendationService
+from shop_agent.services.scenario_recipes import ScenarioRecipeRegistry
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 from tests.integration.api_fakes import ParsedSseEvent, parse_sse
@@ -290,6 +292,148 @@ async def test_live_single_turn_shopping_flow() -> None:
         _assert_exclusion_evidence(constrained_products, evidence.last_validated)
 
 
+@pytest.mark.asyncio
+async def test_live_scenario_combination_flow() -> None:
+    settings = Settings()  # type: ignore[call-arg]
+    if not settings.dashscope_api_key.strip():
+        pytest.fail("DASHSCOPE_API_KEY is required for live tests")
+    catalog = ProductCatalog.load(settings.dataset_root)
+    registry = ScenarioRecipeRegistry.load(settings.scenario_recipe_path, catalog)
+    parser = DashScopeTurnQueryParser(
+        settings,
+        categories=[product.category for product in catalog.all()],
+        sub_categories=[product.sub_category for product in catalog.all()],
+        category_pairs=[
+            (product.category, product.sub_category) for product in catalog.all()
+        ],
+        brands=catalog.brands(),
+        sku_taxonomy=catalog.sku_taxonomy(),
+        scenario_recipes=registry.prompt_summaries(),
+    )
+    store = QdrantStore(settings)
+    embedder = DashScopeEmbedder(settings)
+    await index_catalog(
+        settings,
+        catalog=catalog,
+        embedder=embedder,
+        store=store,
+    )
+    if not await store.collection_ready():
+        pytest.fail("configured Qdrant collection is not ready after indexing")
+    retrieval = InstrumentedRetrievalService(
+        RetrievalService(
+            settings=settings,
+            catalog=catalog,
+            embedder=embedder,
+            store=store,
+            reranker=DashScopeReranker(settings),
+        )
+    )
+    evidence = CapturingEvidenceService(
+        EvidenceService(
+            catalog=catalog,
+            mapper=DashScopeEvidenceMapper(settings),
+        )
+    )
+    graph = build_graph(
+        WorkflowDependencies(
+            turn_query_parser=parser,
+            conversation_repository=SqliteConversationRepository(
+                settings.conversation_db_path
+            ),
+            retrieval_service=retrieval,
+            evidence_service=evidence,
+            response_generator=DashScopeResponseGenerator(settings),
+            catalog=catalog,
+            settings=settings,
+            comparison_assessor=DashScopeComparisonAssessor(settings),
+            scenario_registry=registry,
+            scenario_recommendation_service=ScenarioRecommendationService(
+                retrieval=retrieval,
+                evidence=evidence,
+                product_limit=settings.scenario_product_limit,
+            ),
+        )
+    )
+    app = create_app(
+        ApiDependencies(
+            graph=graph,
+            catalog=catalog,
+            settings=settings,
+            readiness_probe=store,
+        )
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url=settings.public_base_url,
+        timeout=240,
+    ) as client:
+        sanya = await _chat(client, "下周去三亚度假，帮我搭配一套从防晒到穿搭的方案")
+        _assert_completed(sanya)
+        sanya_products = _product_events(sanya)
+        assert len(sanya_products) == 5
+        _assert_scenario_scopes(
+            sanya_products,
+            catalog,
+            [
+                {("美妆护肤", "防晒")},
+                {("服饰运动", "短袖T恤"), ("服饰运动", "速干T恤")},
+                {("服饰运动", "运动短裤")},
+                {("服饰运动", "帽子")},
+                {("服饰运动", "背包")},
+            ],
+        )
+
+        school = await _chat(client, "开学帮我准备一套学习和生活用品")
+        _assert_completed(school)
+        first_school_products = _product_events(school)
+        assert len(first_school_products) == 6
+        school_conversation_id = _conversation_id(school)
+
+        replacement = await _chat(
+            client,
+            "换一套",
+            conversation_id=school_conversation_id,
+        )
+        _assert_completed(replacement)
+        replacement_products = _product_events(replacement)
+        assert len(replacement_products) == 6
+        assert {
+            event.data["product_id"] for event in first_school_products
+        }.isdisjoint(
+            {event.data["product_id"] for event in replacement_products}
+        )
+
+        exhausted = await _chat(
+            client,
+            "还有更多推荐吗",
+            conversation_id=school_conversation_id,
+        )
+        _assert_completed(exhausted)
+        assert _product_events(exhausted) == []
+        assert "没有更多完整组合" in _text(exhausted)
+
+        retrieval.reset_calls()
+        sunglasses = await _chat(
+            client,
+            "去三亚度假，帮我搭配防晒、穿搭和太阳镜",
+        )
+        _assert_completed(sunglasses)
+        assert _product_events(sunglasses) == []
+        assert "太阳镜" in _text(sunglasses)
+        assert retrieval.retrieve_calls == 0
+
+        ordinary = await _chat(client, "推荐防晒霜")
+        _assert_completed(ordinary)
+        ordinary_products = _product_events(ordinary)
+        assert 1 <= len(ordinary_products) <= 3
+        assert all(
+            catalog.get(event.data["product_id"]).sub_category == "防晒"
+            for event in ordinary_products
+        )
+
+
 async def _assert_live_turn_query_parser_contracts(
     parser: DashScopeTurnQueryParser,
     catalog: ProductCatalog,
@@ -467,8 +611,16 @@ async def _assert_live_turn_query_parser_contracts(
     assert direct_earphones.intent == "new_search"
     assert direct_earphones.skip_preference_question is True
 
-async def _chat(client: httpx.AsyncClient, message: str) -> list[ParsedSseEvent]:
-    response = await client.post("/api/v1/chat/stream", json={"message": message})
+async def _chat(
+    client: httpx.AsyncClient,
+    message: str,
+    *,
+    conversation_id: str | None = None,
+) -> list[ParsedSseEvent]:
+    payload = {"message": message}
+    if conversation_id is not None:
+        payload["conversation_id"] = conversation_id
+    response = await client.post("/api/v1/chat/stream", json=payload)
     assert response.status_code == 200
     return parse_sse(response.text)
 
@@ -482,6 +634,31 @@ def _assert_completed(events: Sequence[ParsedSseEvent]) -> None:
 
 def _product_events(events: Sequence[ParsedSseEvent]) -> list[ParsedSseEvent]:
     return [event for event in events if event.name == "product"]
+
+
+def _conversation_id(events: Sequence[ParsedSseEvent]) -> str:
+    value = events[0].data["conversation_id"]
+    assert isinstance(value, str) and value
+    return value
+
+
+def _text(events: Sequence[ParsedSseEvent]) -> str:
+    return "".join(
+        str(event.data["delta"])
+        for event in events
+        if event.name == "text_delta"
+    )
+
+
+def _assert_scenario_scopes(
+    events: Sequence[ParsedSseEvent],
+    catalog: ProductCatalog,
+    expected_scopes: Sequence[set[tuple[str, str]]],
+) -> None:
+    assert len(events) == len(expected_scopes)
+    for event, allowed in zip(events, expected_scopes, strict=True):
+        product = catalog.get(event.data["product_id"])
+        assert (product.category, product.sub_category) in allowed
 
 
 def _assert_catalog_facts(

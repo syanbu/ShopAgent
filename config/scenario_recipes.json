@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "recipes": [
+    {
+      "schema_version": 1,
+      "recipe_id": "beach_vacation",
+      "recipe_version": 1,
+      "display_name": "海边度假",
+      "aliases": ["三亚度假", "海边度假", "海岛旅行", "海边旅行"],
+      "description": "适用于三亚、海岛或海边旅行的防晒和轻薄穿搭方案。",
+      "max_products": 5,
+      "slots": [
+        {
+          "slot_id": "sun_protection",
+          "label": "防晒护理",
+          "group": "防护",
+          "required": true,
+          "query_terms": ["海边防晒", "高温户外防晒"],
+          "catalog_scopes": [{"category": "美妆护肤", "sub_category": "防晒"}]
+        },
+        {
+          "slot_id": "top",
+          "label": "轻薄上装",
+          "group": "穿搭",
+          "required": true,
+          "query_terms": ["海边轻薄上装", "透气短袖", "速干上衣"],
+          "catalog_scopes": [
+            {"category": "服饰运动", "sub_category": "短袖T恤"},
+            {"category": "服饰运动", "sub_category": "速干T恤"}
+          ]
+        },
+        {
+          "slot_id": "bottom",
+          "label": "清凉下装",
+          "group": "穿搭",
+          "required": true,
+          "query_terms": ["海边清凉下装", "透气运动短裤"],
+          "catalog_scopes": [{"category": "服饰运动", "sub_category": "运动短裤"}]
+        },
+        {
+          "slot_id": "hat",
+          "label": "遮阳帽",
+          "group": "配饰",
+          "required": false,
+          "query_terms": ["海边遮阳帽", "户外帽子"],
+          "catalog_scopes": [{"category": "服饰运动", "sub_category": "帽子"}]
+        },
+        {
+          "slot_id": "bag",
+          "label": "随身背包",
+          "group": "配饰",
+          "required": false,
+          "query_terms": ["旅行随身背包", "轻便背包"],
+          "catalog_scopes": [{"category": "服饰运动", "sub_category": "背包"}]
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "recipe_id": "hiking",
+      "recipe_version": 1,
+      "display_name": "户外徒步",
+      "aliases": ["爬山", "徒步", "登山", "户外徒步"],
+      "description": "适用于日间徒步、爬山和普通户外路线的鞋服、防护与补给方案。",
+      "max_products": 6,
+      "slots": [
+        {"slot_id": "shoes", "label": "徒步鞋", "group": "鞋服装备", "required": true, "query_terms": ["户外徒步鞋", "登山行走"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "徒步鞋"}]},
+        {"slot_id": "top", "label": "速干上装", "group": "鞋服装备", "required": true, "query_terms": ["徒步速干T恤", "户外透气上衣"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "速干T恤"}]},
+        {"slot_id": "bottom", "label": "户外下装", "group": "鞋服装备", "required": true, "query_terms": ["徒步户外裤", "运动长裤"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "户外裤"}, {"category": "服饰运动", "sub_category": "运动长裤"}]},
+        {"slot_id": "hat", "label": "户外帽", "group": "防护", "required": false, "query_terms": ["户外遮阳帽"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "帽子"}]},
+        {"slot_id": "bag", "label": "徒步背包", "group": "装备", "required": false, "query_terms": ["徒步背包", "登山随身包"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "背包"}]},
+        {"slot_id": "sun_protection", "label": "户外防晒", "group": "防护", "required": false, "query_terms": ["户外防晒"], "catalog_scopes": [{"category": "美妆护肤", "sub_category": "防晒"}]},
+        {"slot_id": "drink", "label": "功能饮料", "group": "补给", "required": false, "query_terms": ["徒步运动补给饮料"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "功能饮料"}]},
+        {"slot_id": "snack", "label": "坚果零食", "group": "补给", "required": false, "query_terms": ["徒步便携能量零食"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "坚果/零食"}]}
+      ]
+    },
+    {
+      "schema_version": 1,
+      "recipe_id": "running",
+      "recipe_version": 1,
+      "display_name": "跑步训练",
+      "aliases": ["跑步", "晨跑", "夜跑"],
+      "description": "适用于日常跑步训练的鞋服、数码、防护与补给方案。",
+      "max_products": 6,
+      "slots": [
+        {"slot_id": "shoes", "label": "跑步鞋", "group": "鞋服装备", "required": true, "query_terms": ["日常跑步鞋", "跑步训练"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "跑步鞋"}]},
+        {"slot_id": "top", "label": "跑步上装", "group": "鞋服装备", "required": true, "query_terms": ["跑步速干上衣", "运动短袖"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "速干T恤"}, {"category": "服饰运动", "sub_category": "短袖T恤"}]},
+        {"slot_id": "bottom", "label": "跑步短裤", "group": "鞋服装备", "required": true, "query_terms": ["跑步运动短裤"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "运动短裤"}]},
+        {"slot_id": "earbuds", "label": "运动耳机", "group": "数码装备", "required": false, "query_terms": ["跑步真无线耳机"], "catalog_scopes": [{"category": "数码电子", "sub_category": "真无线耳机"}]},
+        {"slot_id": "sun_protection", "label": "户外防晒", "group": "防护", "required": false, "query_terms": ["跑步户外防晒"], "catalog_scopes": [{"category": "美妆护肤", "sub_category": "防晒"}]},
+        {"slot_id": "drink", "label": "运动饮料", "group": "补给", "required": false, "query_terms": ["跑步运动补给饮料"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "功能饮料"}]}
+      ]
+    },
+    {
+      "schema_version": 1,
+      "recipe_id": "back_to_school",
+      "recipe_version": 1,
+      "display_name": "开学准备",
+      "aliases": ["开学", "入学", "新学期"],
+      "description": "适用于大学或住宿学习场景的数码、收纳与日常补给方案。",
+      "max_products": 6,
+      "slots": [
+        {"slot_id": "laptop", "label": "学习电脑", "group": "数码装备", "required": true, "query_terms": ["学生学习笔记本电脑"], "catalog_scopes": [{"category": "数码电子", "sub_category": "笔记本电脑"}]},
+        {"slot_id": "bag", "label": "通勤背包", "group": "日常装备", "required": true, "query_terms": ["学生通勤背包"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "背包"}]},
+        {"slot_id": "phone", "label": "智能手机", "group": "数码装备", "required": false, "query_terms": ["学生日常智能手机"], "catalog_scopes": [{"category": "数码电子", "sub_category": "智能手机"}]},
+        {"slot_id": "earbuds", "label": "真无线耳机", "group": "数码装备", "required": false, "query_terms": ["学习通勤真无线耳机"], "catalog_scopes": [{"category": "数码电子", "sub_category": "真无线耳机"}]},
+        {"slot_id": "coffee", "label": "咖啡", "group": "日常补给", "required": false, "query_terms": ["学习便捷咖啡"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "咖啡"}]},
+        {"slot_id": "convenience_food", "label": "方便食品", "group": "日常补给", "required": false, "query_terms": ["宿舍方便食品"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "方便食品"}]}
+      ]
+    },
+    {
+      "schema_version": 1,
+      "recipe_id": "home_office",
+      "recipe_version": 1,
+      "display_name": "居家办公",
+      "aliases": ["居家办公", "宅家办公"],
+      "description": "适用于在家学习或办公的数码、穿搭与日常补给方案。",
+      "max_products": 6,
+      "slots": [
+        {"slot_id": "laptop", "label": "办公电脑", "group": "办公设备", "required": true, "query_terms": ["居家办公笔记本电脑"], "catalog_scopes": [{"category": "数码电子", "sub_category": "笔记本电脑"}]},
+        {"slot_id": "earbuds", "label": "办公耳机", "group": "办公设备", "required": false, "query_terms": ["居家办公真无线耳机"], "catalog_scopes": [{"category": "数码电子", "sub_category": "真无线耳机"}]},
+        {"slot_id": "top", "label": "居家卫衣", "group": "居家穿搭", "required": false, "query_terms": ["居家舒适卫衣"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "卫衣"}]},
+        {"slot_id": "bottom", "label": "舒适长裤", "group": "居家穿搭", "required": false, "query_terms": ["居家舒适运动长裤"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "运动长裤"}]},
+        {"slot_id": "coffee", "label": "办公咖啡", "group": "吃喝补给", "required": false, "query_terms": ["居家办公咖啡"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "咖啡"}]},
+        {"slot_id": "snack", "label": "坚果零食", "group": "吃喝补给", "required": false, "query_terms": ["居家办公坚果零食"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "坚果/零食"}]}
+      ]
+    },
+    {
+      "schema_version": 1,
+      "recipe_id": "summer_commute",
+      "recipe_version": 1,
+      "display_name": "夏日通勤",
+      "aliases": ["夏日通勤", "高温通勤", "夏天通勤"],
+      "description": "适用于高温天气日常通勤的防晒、轻薄穿搭、底妆和饮品方案。",
+      "max_products": 6,
+      "slots": [
+        {"slot_id": "sun_protection", "label": "通勤防晒", "group": "防护", "required": true, "query_terms": ["夏日通勤防晒"], "catalog_scopes": [{"category": "美妆护肤", "sub_category": "防晒"}]},
+        {"slot_id": "top", "label": "轻薄短袖", "group": "穿搭", "required": true, "query_terms": ["夏日通勤透气短袖"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "短袖T恤"}]},
+        {"slot_id": "hat", "label": "遮阳帽", "group": "配饰", "required": false, "query_terms": ["通勤遮阳帽"], "catalog_scopes": [{"category": "服饰运动", "sub_category": "帽子"}]},
+        {"slot_id": "foundation", "label": "通勤底妆", "group": "底妆", "required": false, "query_terms": ["夏日通勤粉底液"], "catalog_scopes": [{"category": "美妆护肤", "sub_category": "粉底液"}]},
+        {"slot_id": "powder", "label": "定妆蜜粉", "group": "底妆", "required": false, "query_terms": ["夏日定妆蜜粉"], "catalog_scopes": [{"category": "美妆护肤", "sub_category": "蜜粉"}]},
+        {"slot_id": "drink", "label": "解暑饮品", "group": "饮品", "required": false, "query_terms": ["通勤清爽饮品"], "catalog_scopes": [{"category": "食品饮料", "sub_category": "茶饮"}, {"category": "食品饮料", "sub_category": "碳酸饮料"}]}
+      ]
+    }
+  ]
+}

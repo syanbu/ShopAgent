@@ -30,6 +30,8 @@ from shop_agent.services.conversation_repository import (
     SqliteConversationRepository,
 )
 from shop_agent.services.ports import TurnContext, TurnQueryParser
+from shop_agent.services.scenario_recommendation import ScenarioRecommendationService
+from shop_agent.services.scenario_recipes import ScenarioRecipeRegistry
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 
@@ -394,6 +396,7 @@ def compiled_chat_dependencies(
     repository: ConversationRepository | None = None,
     response_generator: DeterministicResponseGenerator | SequencedResponseGenerator | None = None,
     catalog_override: ProductCatalog | None = None,
+    scenario_recipe_path: Path | None = None,
 ) -> tuple[
     ApiDependencies,
     SequencedTurnQueryParser,
@@ -413,6 +416,11 @@ def compiled_chat_dependencies(
     sqlite_repository = SqliteConversationRepository(settings.conversation_db_path)
     retrieval = DeterministicRetrievalService(catalog)
     evidence = DeterministicEvidenceService(catalog)
+    scenario_registry = (
+        ScenarioRecipeRegistry.load(scenario_recipe_path, catalog)
+        if scenario_recipe_path is not None
+        else None
+    )
     graph = build_graph(
         WorkflowDependencies(
             turn_query_parser=parser or sequenced_parser,
@@ -423,6 +431,16 @@ def compiled_chat_dependencies(
             catalog=catalog,
             settings=settings,
             comparison_assessor=DeterministicComparisonAssessor(),
+            scenario_registry=scenario_registry,
+            scenario_recommendation_service=(
+                ScenarioRecommendationService(
+                    retrieval=retrieval,
+                    evidence=evidence,
+                    product_limit=settings.scenario_product_limit,
+                )
+                if scenario_registry is not None
+                else None
+            ),
         )
     )
     return (

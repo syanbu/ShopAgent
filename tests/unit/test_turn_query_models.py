@@ -588,3 +588,48 @@ def test_turn_query_rejects_skip_and_cancel_together() -> None:
             skip_preference_question=True,
             cancel_pending=True,
         )
+
+
+def test_scenario_intent_requires_scenario_request() -> None:
+    query = TurnQuery(
+        schema_version=1,
+        intent="scenario_recommendation",
+        scenario_request={
+            "surface_text": "三亚度假，从防晒到穿搭",
+            "recipe_id": "beach_vacation",
+            "unmapped_requirements": [],
+        },
+    )
+
+    assert query.scenario_request is not None
+    assert query.scenario_request.recipe_id == "beach_vacation"
+
+    with pytest.raises(ValidationError, match="scenario_request"):
+        TurnQuery(schema_version=1, intent="scenario_recommendation")
+
+
+def test_scenario_request_is_exclusive_to_scenario_intent() -> None:
+    with pytest.raises(ValidationError, match="scenario_request"):
+        TurnQuery(
+            schema_version=1,
+            intent="new_search",
+            scenario_request={
+                "surface_text": "三亚度假",
+                "recipe_id": "beach_vacation",
+            },
+        )
+
+
+def test_scenario_intent_rejects_single_category_mutations_and_references() -> None:
+    with pytest.raises(ValidationError, match="scenario recommendations"):
+        TurnQuery(
+            schema_version=1,
+            intent="scenario_recommendation",
+            scenario_request={
+                "surface_text": "三亚度假",
+                "recipe_id": "beach_vacation",
+            },
+            semantic_term_operations=[
+                {"operation": "add", "value": "便宜"}
+            ],
+        )

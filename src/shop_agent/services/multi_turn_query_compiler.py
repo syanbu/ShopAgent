@@ -611,14 +611,18 @@ def _update_search_state(
     if intent not in {"new_search", "switch_category"}:
         return state.model_copy(
             update={
+                "active_task": "product_search",
                 "query_snapshot": snapshot.model_copy(deep=True),
+                "scenario_snapshot": None,
                 "pending_clarification": None,
             },
             deep=True,
         )
     return state.model_copy(
         update={
+            "active_task": "product_search",
             "query_snapshot": snapshot.model_copy(deep=True),
+            "scenario_snapshot": None,
             "recent_candidates": [],
             "focused_product_id": None,
             "seen_product_ids": [],

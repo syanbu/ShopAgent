@@ -21,6 +21,8 @@ def test_settings_default_conversation_database_path() -> None:
     settings = Settings(dashscope_api_key="test")
 
     assert settings.conversation_db_path == Path(".data/conversations.sqlite3")
+    assert settings.scenario_recipe_path == Path("config/scenario_recipes.json")
+    assert settings.scenario_product_limit == 6
 
 
 def test_project_does_not_declare_an_unimplemented_console_script() -> None:
@@ -35,3 +37,9 @@ def test_project_does_not_declare_an_unimplemented_console_script() -> None:
 def test_final_product_limit_stays_within_card_contract(limit: int) -> None:
     with pytest.raises(ValidationError):
         Settings(dashscope_api_key="test-key", final_product_limit=limit)
+
+
+@pytest.mark.parametrize("limit", [0, 9])
+def test_scenario_product_limit_stays_within_bundle_contract(limit: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(dashscope_api_key="test-key", scenario_product_limit=limit)

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from shop_agent.api import dependencies as api_dependencies
@@ -42,6 +43,12 @@ def test_build_api_dependencies_injects_lazy_repository_and_catalog_turn_parser(
         lambda _: harness.catalog,
     )
     monkeypatch.setattr(api_dependencies, "QdrantStore", lambda _: store)
+    scenario_registry = SimpleNamespace(prompt_summaries=lambda: [])
+    monkeypatch.setattr(
+        api_dependencies.ScenarioRecipeRegistry,
+        "load",
+        lambda *_: scenario_registry,
+    )
     monkeypatch.setattr(api_dependencies, "build_graph", capture_graph)
     monkeypatch.setattr(repository_module.aiosqlite, "connect", fail_if_database_opens)
 
@@ -55,6 +62,8 @@ def test_build_api_dependencies_injects_lazy_repository_and_catalog_turn_parser(
     assert workflow.conversation_repository._database_path == settings.conversation_db_path
     assert isinstance(workflow.turn_query_parser, DashScopeTurnQueryParser)
     assert isinstance(workflow.comparison_assessor, DashScopeComparisonAssessor)
+    assert workflow.scenario_registry is scenario_registry
+    assert workflow.scenario_recommendation_service is not None
     assert workflow.turn_query_parser._model == settings.chat_model
     assert workflow.comparison_assessor._model == settings.comparison_model
     assert workflow.turn_query_parser._categories == ("数码电子",)

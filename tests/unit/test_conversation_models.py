@@ -8,6 +8,7 @@ from shop_agent.models.conversation import (
     PendingClarification,
     QuerySnapshot,
 )
+from shop_agent.models.scenario import ScenarioBundleItem, ScenarioSnapshot
 from shop_agent.models.turn_query import (
     CategoryCandidate,
     ProductQuestion,
@@ -293,7 +294,9 @@ def test_state_json_contains_only_persisted_domain_state() -> None:
     assert set(persisted) == {
         "schema_version",
         "conversation_id",
+        "active_task",
         "query_snapshot",
+        "scenario_snapshot",
         "recent_candidates",
         "focused_product_id",
         "seen_product_ids",
@@ -334,3 +337,108 @@ def test_missing_preferences_pending_round_trip_preserves_suspended_search() -> 
     assert restored == pending
     assert restored.kind == "missing_preferences"
     assert restored.suspended_turn_query.intent == "new_search"
+
+
+def _scenario_snapshot() -> ScenarioSnapshot:
+    return ScenarioSnapshot(
+        schema_version=1,
+        recipe_id="beach_vacation",
+        recipe_version=1,
+        original_request="三亚度假",
+        current_bundle=[
+            ScenarioBundleItem(
+                rank=1,
+                slot_id="sun_protection",
+                product_id="p1",
+                display_price=199,
+            )
+        ],
+        seen_product_ids=["p1"],
+        generation_index=1,
+    )
+
+
+def test_legacy_v1_state_is_upgraded_to_v2_with_active_product_task() -> None:
+    state = ConversationState(
+        schema_version=1,
+        conversation_id="legacy",
+        query_snapshot=QuerySnapshot(
+            category="数码电子",
+            sub_category="智能手机",
+        ),
+    )
+
+    assert state.schema_version == 2
+    assert state.active_task == "product_search"
+    assert state.scenario_snapshot is None
+
+
+def test_conversation_enforces_one_active_task_snapshot() -> None:
+    scenario = ConversationState(
+        schema_version=2,
+        conversation_id="scenario",
+        active_task="scenario_recommendation",
+        scenario_snapshot=_scenario_snapshot(),
+        recent_candidates=[_candidate("p1", 1)],
+        seen_product_ids=["p1"],
+    )
+    assert scenario.scenario_snapshot == _scenario_snapshot()
+
+    with pytest.raises(ValidationError, match="product_search active task"):
+        ConversationState(
+            schema_version=2,
+            conversation_id="invalid",
+            active_task="product_search",
+        )
+    with pytest.raises(ValidationError, match="scenario_recommendation active task"):
+        ConversationState(
+            schema_version=2,
+            conversation_id="invalid",
+            active_task="scenario_recommendation",
+        )
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        ConversationState(
+            schema_version=2,
+            conversation_id="invalid",
+            active_task="scenario_recommendation",
+            query_snapshot=QuerySnapshot(
+                category="数码电子",
+                sub_category="智能手机",
+            ),
+            scenario_snapshot=_scenario_snapshot(),
+        )
+
+
+def test_scenario_recipe_pending_round_trip_preserves_allowed_recipe_ids() -> None:
+    pending = PendingClarification(
+        kind="scenario_recipe",
+        candidate_recipe_ids=["beach_vacation", "hiking"],
+        suspended_turn_query=TurnQuery(
+            schema_version=1,
+            intent="scenario_recommendation",
+            scenario_request={
+                "surface_text": "出去玩准备一套",
+                "recipe_id": None,
+            },
+        ),
+    )
+
+    restored = PendingClarification.model_validate_json(pending.model_dump_json())
+
+    assert restored.candidate_recipe_ids == ("beach_vacation", "hiking")
+
+
+def test_state_json_includes_only_new_persisted_scenario_domain_fields() -> None:
+    state = ConversationState(schema_version=2, conversation_id="c1")
+
+    assert set(state.model_dump()) == {
+        "schema_version",
+        "conversation_id",
+        "active_task",
+        "query_snapshot",
+        "scenario_snapshot",
+        "recent_candidates",
+        "focused_product_id",
+        "seen_product_ids",
+        "pending_clarification",
+    }

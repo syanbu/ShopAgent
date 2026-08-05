@@ -28,6 +28,9 @@ from tests.integration.api_fakes import (
 )
 
 
+PROJECT_ROOT = Path(__file__).parents[2]
+
+
 def _dependencies(
     sample_dataset_root: Path,
     graph: FakeGraph,
@@ -49,6 +52,64 @@ async def _post(
     transport = httpx.ASGITransport(app=create_app(dependencies))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post("/api/v1/chat/stream", json=payload)
+
+
+@pytest.mark.asyncio
+async def test_scenario_chat_keeps_request_and_product_event_contracts(
+    tmp_path: Path,
+) -> None:
+    catalog = ProductCatalog.load(PROJECT_ROOT / "ecommerce_agent_dataset")
+    turn = TurnQuery(
+        schema_version=1,
+        intent="scenario_recommendation",
+        scenario_request={
+            "surface_text": "下周去三亚度假，从防晒到穿搭",
+            "recipe_id": "beach_vacation",
+        },
+    )
+    dependencies, _, repository, _, _ = compiled_chat_dependencies(
+        tmp_path,
+        turns=[turn],
+        catalog_override=catalog,
+        scenario_recipe_path=PROJECT_ROOT / "config" / "scenario_recipes.json",
+    )
+
+    response = await _post(
+        dependencies,
+        {
+            "conversation_id": "scenario-http",
+            "message": "下周去三亚度假，从防晒到穿搭",
+        },
+    )
+
+    assert response.status_code == 200
+    events = parse_sse(response.text)
+    assert [event.name for event in events] == [
+        "message_start",
+        "product",
+        "product",
+        "product",
+        "product",
+        "product",
+        "text_delta",
+        "message_end",
+    ]
+    expected_fields = {
+        "rank",
+        "product_id",
+        "title",
+        "brand",
+        "base_price",
+        "display_price",
+        "matched_skus",
+        "image_url",
+    }
+    assert all(set(event.data) == expected_fields for event in events[1:6])
+    assert [event.data["rank"] for event in events[1:6]] == [1, 2, 3, 4, 5]
+    stored = await repository.load("scenario-http")
+    assert stored is not None
+    assert stored.state.active_task == "scenario_recommendation"
+    assert stored.state.scenario_snapshot is not None
 
 
 def _enable_exact_product_chunks(retrieval: Any) -> None:

@@ -414,9 +414,11 @@ ProductQuestion
 
 ```text
 ConversationState
-  schema_version = 1
+  schema_version = 2
   conversation_id
+  active_task: null | product_search | scenario_recommendation
   query_snapshot
+  scenario_snapshot
   recent_candidates[]
     rank
     product_id
@@ -435,7 +437,7 @@ SKU 和文本证据不写入 SQLite。SQL 乐观并发版本只属于 `Conversat
 序列化的 `ConversationState.state_json`。
 
 `PendingClarification` 实际保存 `kind`、不可变的 `candidate_product_ids`、
-不可变的 `candidate_category_scopes`、被暂停的 `suspended_turn_query` 与
+不可变的 `candidate_category_scopes`、受限的 `candidate_recipe_ids`、被暂停的 `suspended_turn_query` 与
 `attempt_count`。商品歧义使用商品 ID，品类歧义使用规范品类范围。初次未解析写入 1；
 下一次仍未解析立即退出，不保存等待第三次回答的状态。
 
@@ -446,6 +448,14 @@ Catalog 候选超过展示上限且精确子品类存在审核问题策略时保
 SQLite 或 `QuerySnapshot`。跳过或无有效操作都恢复原搜索，不使用阻塞型澄清的第二次失败
 退出规则。详细门槛和白名单见
 [Agent 主动需求澄清](proactive-requirement-clarification.md)。
+
+`active_task` 决定通用 `more_results` 是普通换批还是场景整套换新。普通任务只允许
+`query_snapshot`，场景任务只允许 `scenario_snapshot`，两者不能并存。明确的新普通搜索
+会清除场景快照；明确的场景请求会清除普通查询快照。商品问答和二至三款商品对比只改变
+最近候选或焦点，不改变活动任务，因此完成追问后仍可继续原任务。schema v1 的 SQLite
+JSON 在读取边界自动升级：有 `query_snapshot` 时恢复为 `product_search`，否则活动任务为
+空；下次成功保存写回 v2。场景模板、槽位和换套耗尽规则见
+[场景化组合推荐](scenario-combination-recommendation.md)。
 
 ### SQLite
 

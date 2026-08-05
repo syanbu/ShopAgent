@@ -20,6 +20,8 @@ from shop_agent.services.dashscope_rerank import DashScopeReranker
 from shop_agent.services.evidence import EvidenceService
 from shop_agent.services.qdrant_store import QdrantStore
 from shop_agent.services.retrieval import RetrievalService
+from shop_agent.services.scenario_recommendation import ScenarioRecommendationService
+from shop_agent.services.scenario_recipes import ScenarioRecipeRegistry
 from shop_agent.workflow.dependencies import WorkflowDependencies
 from shop_agent.workflow.graph import build_graph
 
@@ -73,6 +75,15 @@ def build_api_dependencies(settings: Settings | None = None) -> ApiDependencies:
         catalog=catalog,
         mapper=DashScopeEvidenceMapper(resolved_settings),
     )
+    scenario_registry = ScenarioRecipeRegistry.load(
+        resolved_settings.scenario_recipe_path,
+        catalog,
+    )
+    scenario_recommendation = ScenarioRecommendationService(
+        retrieval=retrieval,
+        evidence=evidence,
+        product_limit=resolved_settings.scenario_product_limit,
+    )
     graph = build_graph(
         WorkflowDependencies(
             turn_query_parser=DashScopeTurnQueryParser(
@@ -91,6 +102,7 @@ def build_api_dependencies(settings: Settings | None = None) -> ApiDependencies:
                 ),
                 brands=catalog.brands(),
                 sku_taxonomy=catalog.sku_taxonomy(),
+                scenario_recipes=scenario_registry.prompt_summaries(),
             ),
             conversation_repository=SqliteConversationRepository(
                 resolved_settings.conversation_db_path
@@ -101,6 +113,8 @@ def build_api_dependencies(settings: Settings | None = None) -> ApiDependencies:
             catalog=catalog,
             settings=resolved_settings,
             comparison_assessor=DashScopeComparisonAssessor(resolved_settings),
+            scenario_registry=scenario_registry,
+            scenario_recommendation_service=scenario_recommendation,
         )
     )
     return ApiDependencies(

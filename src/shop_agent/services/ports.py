@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,6 +10,7 @@ from shop_agent.models.comparison import (
 from shop_agent.models.conversation import PendingClarification, QuerySnapshot
 from shop_agent.models.query import EvidenceCondition, ParsedIntent
 from shop_agent.models.retrieval import EvidenceAssessment, EvidenceChunk
+from shop_agent.models.scenario import ScenarioSnapshot
 from shop_agent.models.turn_query import TurnCandidateSummary, TurnQuery
 
 
@@ -17,6 +18,8 @@ class TurnContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query_snapshot: QuerySnapshot | None = None
+    active_task: Literal["product_search", "scenario_recommendation"] | None = None
+    scenario_snapshot: ScenarioSnapshot | None = None
     recent_candidates: list[TurnCandidateSummary] = Field(default_factory=list)
     focused_product_id: str | None = None
     pending_clarification: PendingClarification | None = None

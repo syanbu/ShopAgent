@@ -26,6 +26,7 @@ from shop_agent.services.dashscope_chat import (
     DashScopeResponseGenerator,
     DashScopeTurnQueryParser,
     _build_intent_system_prompt,
+    _build_scenario_gate_system_prompt,
     _build_turn_query_system_prompt,
 )
 from shop_agent.services.dashscope_embedding import DashScopeEmbedder
@@ -190,6 +191,59 @@ def _turn_parser(
                 }
             },
         )
+
+
+def _scenario_turn_parser(
+    settings: Settings,
+    client: SimpleNamespace,
+) -> DashScopeTurnQueryParser:
+    with patch("shop_agent.services.dashscope_chat.AsyncOpenAI", return_value=client):
+        return DashScopeTurnQueryParser(
+            settings,
+            scenario_recipes=[
+                {
+                    "recipe_id": "beach_vacation",
+                    "display_name": "海边度假",
+                    "aliases": ["三亚度假"],
+                    "description": "海边防晒和穿搭方案",
+                    "slot_labels": ["防晒护理", "轻薄上装", "清凉下装"],
+                },
+                {
+                    "recipe_id": "back_to_school",
+                    "display_name": "开学准备",
+                    "aliases": ["开学", "入学", "新学期"],
+                    "description": "大学或住宿学习场景",
+                    "slot_labels": ["学习电脑", "通勤背包"],
+                },
+            ],
+        )
+
+
+def test_turn_query_prompt_builds_examples_from_approved_scenario_recipes() -> None:
+    recipes = [
+        {
+            "recipe_id": "back_to_school",
+            "display_name": "开学准备",
+            "aliases": ["开学", "入学", "新学期"],
+            "description": "大学或住宿学习场景",
+            "slot_labels": ["学习电脑", "通勤背包"],
+        }
+    ]
+    prompt = _build_turn_query_system_prompt(
+        categories=(),
+        sub_categories=(),
+        category_pairs=(),
+        scenario_recipes=recipes,
+    )
+    gate_prompt = _build_scenario_gate_system_prompt(recipes)
+
+    assert "即使用户没有逐项列出商品" in prompt
+    assert "场景组合判断必须先于 non_shopping" in prompt
+    assert "开学帮我准备一套学习和生活用品" in prompt
+    assert '"input":"开学帮我准备一套相关商品"' in prompt
+    assert '"intent":"scenario_recommendation"' in prompt
+    assert '"recipe_id":"back_to_school"' in prompt
+    assert "宽泛集合描述由匹配模板整体覆盖" in gate_prompt
 
 
 def _category_turn_parser(
@@ -723,7 +777,9 @@ async def test_turn_query_parser_sends_only_compact_current_context(
     payload = json.loads(messages[1]["content"])
     assert set(payload) == {
         "message",
+        "active_task",
         "query_snapshot",
+        "scenario_snapshot",
         "recent_candidates",
         "focused_product_id",
         "pending_clarification",
@@ -752,6 +808,142 @@ async def test_turn_query_parser_sends_only_compact_current_context(
     assert "description" not in serialized
     assert "history" not in serialized
     assert "messages" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_accepts_only_an_approved_scenario_recipe(
+    settings: Settings,
+) -> None:
+    valid = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "scenario_recommendation",
+                "scenario_request": {
+                    "surface_text": "下周去三亚度假，从防晒到穿搭",
+                    "recipe_id": "beach_vacation",
+                    "unmapped_requirements": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(return_value=valid)
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    parser = _scenario_turn_parser(settings, client)
+
+    result = await parser.parse(
+        "下周去三亚度假，从防晒到穿搭",
+        TurnContext(),
+    )
+
+    assert result.scenario_request is not None
+    assert result.scenario_request.recipe_id == "beach_vacation"
+    assert "beach_vacation" in parser._system_prompt
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_prefilters_an_explicit_scenario_bundle(
+    settings: Settings,
+) -> None:
+    selection = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "is_scenario_recommendation": True,
+                "recipe_id": "back_to_school",
+                "unmapped_requirements": [],
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(return_value=selection)
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _scenario_turn_parser(settings, client).parse(
+        "开学帮我准备一套学习和生活用品",
+        TurnContext(),
+    )
+
+    assert result.intent == "scenario_recommendation"
+    assert result.scenario_request is not None
+    assert result.scenario_request.recipe_id == "back_to_school"
+    assert create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_falls_back_when_scenario_prefilter_rejects(
+    settings: Settings,
+) -> None:
+    not_scenario = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "is_scenario_recommendation": False,
+                "recipe_id": None,
+                "unmapped_requirements": [],
+            },
+            ensure_ascii=False,
+        )
+    )
+    ordinary = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "non_shopping",
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(side_effect=[not_scenario, ordinary])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    result = await _scenario_turn_parser(settings, client).parse(
+        "给我一套建议",
+        TurnContext(),
+    )
+
+    assert result.intent == "non_shopping"
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_query_parser_rejects_unapproved_scenario_recipe_after_retry(
+    settings: Settings,
+) -> None:
+    invalid = _chat_response(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "intent": "scenario_recommendation",
+                "scenario_request": {
+                    "surface_text": "下周去三亚度假，从防晒到穿搭",
+                    "recipe_id": "invented_recipe",
+                    "unmapped_requirements": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    create = AsyncMock(side_effect=[invalid, invalid])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        await _scenario_turn_parser(settings, client).parse(
+            "下周去三亚度假，从防晒到穿搭",
+            TurnContext(),
+        )
+
+    assert caught.value.code == "TURN_QUERY_PARSE_FAILED"
+    assert create.await_count == 2
 
 
 @pytest.mark.asyncio

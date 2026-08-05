@@ -64,7 +64,7 @@ def parse_sse(lines: Iterable[str]) -> Iterator[SseEvent]:
 
 def _format_price(value: object) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return f"¥{value:.2f}"
+        return f"CNY {value:.2f}"
     return "-"
 
 
@@ -266,7 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0 if completed else 1
 
             print(f"ShopAgent 测试客户端（conversation_id={conversation_id}）")
-            print("当前服务为单轮对话；该 ID 只用于关联事件。输入 /quit 退出。")
+            print("同一 conversation_id 会保留多轮购物上下文。输入 /quit 退出。")
             while True:
                 try:
                     message = input("你> ").strip()

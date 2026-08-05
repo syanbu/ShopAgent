@@ -10,6 +10,7 @@
 | 课题原始说明 | [shopAgentDescription.md](shopAgentDescription.md) |
 | 功能文档约定 | [features/README.md](features/README.md) |
 | 功能文档模板 | [features/_template.md](features/_template.md) |
+| 安卓客户端文档索引 | [../android/docs/README.md](../android/docs/README.md) |
 
 ## 设计说明
 
@@ -29,6 +30,7 @@
 | 多轮 Query 编译、稳定条件细化与指代消解 | 已完成 | [features/multi-turn-query-engine.md](features/multi-turn-query-engine.md) | `src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/services/ports.py`、`src/shop_agent/services/conversation_repository.py`、`src/shop_agent/services/reference_resolver.py`、`src/shop_agent/services/multi_turn_query_compiler.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/services/retrieval.py`、`src/shop_agent/services/qdrant_store.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py`、`src/shop_agent/api/dependencies.py`、`src/shop_agent/api/chat.py`、`tests/unit/test_model_gateways.py`、`tests/unit/test_reference_resolver.py`、`tests/unit/test_multi_turn_workflow.py`、`tests/integration/test_chat_api.py`、`tests/live/test_live_shopping_flow.py` |
 | 多商品对比决策 | 已完成 | [features/multi-product-comparison.md](features/multi-product-comparison.md) | `src/shop_agent/models/comparison.py`、`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/models/state.py`、`src/shop_agent/services/ports.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py`、`src/shop_agent/api/dependencies.py`、`tests/unit/test_comparison_models.py`、`tests/unit/test_product_comparison_workflow.py`、`tests/unit/test_model_gateways.py`、`tests/integration/test_chat_api.py`、`tests/live/test_live_shopping_flow.py` |
 | Agent 主动需求澄清 | 开发中 | [features/proactive-requirement-clarification.md](features/proactive-requirement-clarification.md) | `src/shop_agent/services/proactive_clarification.py`、`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/workflow/nodes.py`、`src/shop_agent/workflow/graph.py` |
+| 场景化组合推荐 | 已完成 | [features/scenario-combination-recommendation.md](features/scenario-combination-recommendation.md) | `config/scenario_recipes.json`、`src/shop_agent/models/scenario.py`、`src/shop_agent/services/scenario_recipes.py`、`src/shop_agent/services/scenario_compiler.py`、`src/shop_agent/services/scenario_recommendation.py`、`src/shop_agent/services/dashscope_chat.py`、`src/shop_agent/models/turn_query.py`、`src/shop_agent/models/conversation.py`、`src/shop_agent/workflow/`、`src/shop_agent/api/dependencies.py`、`tests/unit/test_scenario_*.py`、`tests/unit/test_model_gateways.py`、`tests/integration/test_chat_api.py`、`tests/live/test_live_shopping_flow.py` |
 
 ## 更新规则
 

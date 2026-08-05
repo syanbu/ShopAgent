@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shop_agent.models.query import CanonicalSkuKey, NumericConstraint
+from shop_agent.models.scenario import ScenarioRequest
 
 
 TurnIntent = Literal[
@@ -14,6 +15,7 @@ TurnIntent = Literal[
     "more_results",
     "product_question",
     "product_comparison",
+    "scenario_recommendation",
     "clarification_answer",
     "non_shopping",
 ]
@@ -311,11 +313,37 @@ class TurnQuery(BaseModel):
     relative_price: RelativePriceDirection | None = None
     product_question: ProductQuestion | None = None
     product_comparison: ProductComparison | None = None
+    scenario_request: ScenarioRequest | None = None
     skip_preference_question: bool = False
     cancel_pending: bool = False
 
     @model_validator(mode="after")
     def validate_turn_contract(self) -> "TurnQuery":
+        if self.intent == "scenario_recommendation":
+            if self.scenario_request is None:
+                raise ValueError(
+                    "scenario_request is required for scenario_recommendation intent"
+                )
+            if (
+                self.reference is not None
+                or self.category_reference is not None
+                or self.semantic_term_operations
+                or self.slot_operations
+                or self.approximate_price is not None
+                or self.relative_price is not None
+                or self.product_question is not None
+                or self.product_comparison is not None
+                or self.skip_preference_question
+                or self.cancel_pending
+            ):
+                raise ValueError(
+                    "scenario recommendations cannot include ordinary search "
+                    "mutations, references, questions, or clarification controls"
+                )
+        elif self.scenario_request is not None:
+            raise ValueError(
+                "scenario_request is allowed only for scenario_recommendation intent"
+            )
         if self.skip_preference_question:
             if self.intent not in {
                 "new_search",

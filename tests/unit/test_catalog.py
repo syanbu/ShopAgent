@@ -43,14 +43,14 @@ def test_catalog_exposes_sorted_unique_brands(
     assert catalog.brands() == ["Apple 苹果", "小米"]
 
 
-def test_repository_dataset_contains_112_products() -> None:
+def test_repository_dataset_contains_113_products() -> None:
     root = Path("ecommerce_agent_dataset")
     if not root.exists():
         pytest.skip("repository dataset is unavailable")
     catalog = ProductCatalog.load(root)
     products = catalog.all()
 
-    assert len(products) == 112
+    assert len(products) == 113
     assert sum(product.sub_category == "智能手机" for product in products) == 14
     assert sum(product.sub_category == "真无线耳机" for product in products) == 10
     assert {

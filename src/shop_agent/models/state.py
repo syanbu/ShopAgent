@@ -18,7 +18,9 @@ from shop_agent.models.retrieval import (
     SelectedProduct,
     ValidatedCandidate,
 )
+from shop_agent.models.scenario import ScenarioSnapshot, SolutionRecipe
 from shop_agent.models.turn_query import CategoryCandidate, TurnQuery
+from shop_agent.services.scenario_recommendation import ScenarioSelectedItem
 
 
 NoResultReason = Literal[
@@ -35,6 +37,13 @@ class ShoppingState(TypedDict, total=False):
     conversation_record: ConversationRecord
     conversation_state: ConversationState
     turn_query: TurnQuery
+    scenario_operation: Literal["new_bundle", "replace_bundle"]
+    scenario_compile_outcome: Literal["build", "persist_message", "emit_message"]
+    scenario_recipe: SolutionRecipe
+    scenario_snapshot: ScenarioSnapshot
+    scenario_previous_state: ConversationState
+    scenario_selected_items: list[ScenarioSelectedItem]
+    missing_required_slot_ids: list[str]
     resolved_product_id: str
     comparison_product_ids: list[str]
     comparison_materials: list[ComparisonProductMaterial]

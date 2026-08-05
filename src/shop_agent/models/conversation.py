@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shop_agent.models.query import ParsedIntent, SearchConstraints
+from shop_agent.models.scenario import ScenarioSnapshot
 from shop_agent.models.turn_query import CategoryCandidate, TurnQuery
 
 
@@ -78,9 +79,11 @@ class PendingClarification(BaseModel):
         "ambiguous_comparison_targets",
         "missing_comparison_dimension",
         "missing_preferences",
+        "scenario_recipe",
     ]
     candidate_product_ids: tuple[str, ...] = ()
     candidate_category_scopes: tuple[CategoryCandidate, ...] = ()
+    candidate_recipe_ids: tuple[str, ...] = ()
     suspended_turn_query: TurnQuery
     attempt_count: int = Field(default=1, ge=1, le=2)
 
@@ -106,17 +109,42 @@ class PendingClarification(BaseModel):
             raise ValueError("category scopes must be unique")
         return value
 
+    @field_validator("candidate_recipe_ids", mode="before")
+    @classmethod
+    def normalize_candidate_recipe_ids(
+        cls,
+        value: list[str] | tuple[str, ...],
+    ) -> tuple[str, ...]:
+        normalized = tuple(_normalize_product_ids(value))
+        return normalized
+
 
 class ConversationState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     conversation_id: str = Field(min_length=1, max_length=128)
+    active_task: Literal["product_search", "scenario_recommendation"] | None = None
     query_snapshot: QuerySnapshot | None = None
+    scenario_snapshot: ScenarioSnapshot | None = None
     recent_candidates: list[CandidateReference] = Field(default_factory=list)
     focused_product_id: str | None = None
     seen_product_ids: list[str] = Field(default_factory=list)
     pending_clarification: PendingClarification | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_legacy_state(cls, value: object) -> object:
+        if not isinstance(value, dict) or value.get("schema_version") != 1:
+            return value
+        upgraded = dict(value)
+        upgraded["schema_version"] = 2
+        upgraded.setdefault(
+            "active_task",
+            "product_search" if upgraded.get("query_snapshot") is not None else None,
+        )
+        upgraded.setdefault("scenario_snapshot", None)
+        return upgraded
 
     @field_validator("focused_product_id", mode="before")
     @classmethod
@@ -137,6 +165,22 @@ class ConversationState(BaseModel):
 
     @model_validator(mode="after")
     def validate_persisted_references(self) -> "ConversationState":
+        if self.active_task == "product_search":
+            if self.query_snapshot is None:
+                raise ValueError(
+                    "product_search active task requires a query snapshot"
+                )
+            if self.scenario_snapshot is not None:
+                raise ValueError("task snapshots must be mutually exclusive")
+        elif self.active_task == "scenario_recommendation":
+            if self.scenario_snapshot is None:
+                raise ValueError(
+                    "scenario_recommendation active task requires a scenario snapshot"
+                )
+            if self.query_snapshot is not None:
+                raise ValueError("task snapshots must be mutually exclusive")
+        elif self.query_snapshot is not None or self.scenario_snapshot is not None:
+            raise ValueError("inactive conversation cannot retain a task snapshot")
         ranks = [candidate.rank for candidate in self.recent_candidates]
         if sorted(ranks) != list(range(1, len(ranks) + 1)):
             raise ValueError("recent candidate ranks must be unique and contiguous")

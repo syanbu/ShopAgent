@@ -1,5 +1,5 @@
 import json
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 from typing import Any
 
 import httpx
@@ -80,12 +80,37 @@ def test_render_event_displays_product_text_and_end() -> None:
 
     output = stdout.getvalue()
     assert "[开始] request_id=r1 conversation_id=c1" in output
-    assert "[商品 1] 测试耳机 | 测试品牌 | ¥399.00" in output
-    assert "SKU sku1: color=黑色 | ¥399.00" in output
+    assert "[商品 1] 测试耳机 | 测试品牌 | CNY 399.00" in output
+    assert "SKU sku1: color=黑色 | CNY 399.00" in output
     assert "http://test/image" in output
     assert "助手> 推荐结果" in output
     assert "[结束] request_id=r1 status=completed" in output
     assert stderr.getvalue() == ""
+
+
+def test_render_event_price_is_safe_for_windows_gbk_stdout() -> None:
+    buffer = BytesIO()
+    stdout = TextIOWrapper(buffer, encoding="gbk", errors="strict")
+
+    render_event(
+        SseEvent(
+            "product",
+            {
+                "rank": 1,
+                "product_id": "p1",
+                "title": "测试商品",
+                "brand": "测试品牌",
+                "display_price": 399.0,
+                "matched_skus": [],
+            },
+        ),
+        DisplayState(),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+    stdout.flush()
+
+    assert "399.00" in buffer.getvalue().decode("gbk")
 
 
 def test_render_event_reports_errors_and_unknown_events() -> None:

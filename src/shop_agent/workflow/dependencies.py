@@ -19,6 +19,8 @@ from shop_agent.services.ports import (
     ResponseGenerator,
     TurnQueryParser,
 )
+from shop_agent.services.scenario_recommendation import ScenarioRecommendationService
+from shop_agent.services.scenario_recipes import ScenarioRecipeRegistry
 
 
 class RetrievalOperations(Protocol):
@@ -77,3 +79,5 @@ class WorkflowDependencies:
     settings: Settings
     comparison_assessor: ComparisonAssessor | None = None
     id_factory: Callable[[], str] = _new_id
+    scenario_registry: ScenarioRecipeRegistry | None = None
+    scenario_recommendation_service: ScenarioRecommendationService | None = None

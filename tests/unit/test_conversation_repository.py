@@ -5,6 +5,7 @@ import pytest
 
 from shop_agent.errors import ServiceError
 from shop_agent.models import CandidateReference, ConversationState, QuerySnapshot
+from shop_agent.models.scenario import ScenarioBundleItem, ScenarioSnapshot
 from shop_agent.services.conversation_repository import SqliteConversationRepository
 
 
@@ -153,7 +154,7 @@ async def test_sqlite_errors_are_normalized_without_secret_or_path_leakage(
     "state_json",
     [
         "secret-marker malformed JSON",
-        '{"schema_version": 2, "conversation_id": "secret-marker"}',
+        '{"schema_version": 3, "conversation_id": "secret-marker"}',
     ],
 )
 async def test_invalid_persisted_state_is_normalized_without_content_leakage(
@@ -181,3 +182,74 @@ async def test_invalid_persisted_state_is_normalized_without_content_leakage(
     assert captured.value.retryable is True
     assert captured.value.message == "conversation storage unavailable"
     assert "secret-marker" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_repository_load_migrates_legacy_v1_json(tmp_path: Path) -> None:
+    database_path = tmp_path / "conversation.sqlite3"
+    repository = SqliteConversationRepository(database_path)
+    await repository.load("missing")
+
+    legacy_json = (
+        '{"schema_version":1,"conversation_id":"legacy",'
+        '"query_snapshot":{"category":"数码电子",'
+        '"sub_category":"智能手机","semantic_terms":[],"constraints":{}},'
+        '"recent_candidates":[],"focused_product_id":null,'
+        '"seen_product_ids":[],"pending_clarification":null}'
+    )
+    async with aiosqlite.connect(database_path) as connection:
+        await connection.execute(
+            "INSERT INTO conversation_state "
+            "(conversation_id, version, state_json, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("legacy", 1, legacy_json, "2026-08-05T00:00:00+00:00"),
+        )
+        await connection.commit()
+
+    restored = await SqliteConversationRepository(database_path).load("legacy")
+
+    assert restored is not None
+    assert restored.state.schema_version == 2
+    assert restored.state.active_task == "product_search"
+    assert restored.state.scenario_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_scenario_v2_state_survives_repository_recreation(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "scenario.sqlite3"
+    repository = SqliteConversationRepository(database_path)
+    scenario = ScenarioSnapshot(
+        schema_version=1,
+        recipe_id="beach_vacation",
+        recipe_version=1,
+        original_request="三亚度假，从防晒到穿搭",
+        current_bundle=[
+            ScenarioBundleItem(
+                rank=1,
+                slot_id="sun_protection",
+                product_id="p1",
+                display_price=199,
+            )
+        ],
+        seen_product_ids=["p1"],
+        generation_index=1,
+    )
+    state = ConversationState(
+        schema_version=2,
+        conversation_id="scenario",
+        active_task="scenario_recommendation",
+        scenario_snapshot=scenario,
+        recent_candidates=[
+            CandidateReference(rank=1, product_id="p1", display_price=199)
+        ],
+        seen_product_ids=["p1"],
+    )
+
+    await repository.save(state, expected_version=None)
+    restored = await SqliteConversationRepository(database_path).load("scenario")
+
+    assert restored is not None
+    assert restored.state == state
+    assert restored.state.scenario_snapshot == scenario

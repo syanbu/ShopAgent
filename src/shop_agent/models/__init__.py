@@ -13,6 +13,14 @@ from shop_agent.models.comparison import (
     ComparisonProductFinding,
     ComparisonProductMaterial,
 )
+from shop_agent.models.scenario import (
+    CatalogScope,
+    ScenarioBundleItem,
+    ScenarioRequest,
+    ScenarioSlotSpec,
+    ScenarioSnapshot,
+    SolutionRecipe,
+)
 from shop_agent.models.turn_query import (
     CategoryCandidate,
     CategoryReference,
@@ -29,6 +37,7 @@ from shop_agent.models.turn_query import (
 
 __all__ = [
     "CandidateReference",
+    "CatalogScope",
     "CategoryCandidate",
     "CategoryReference",
     "ComparisonAssessment",
@@ -44,8 +53,13 @@ __all__ = [
     "ProductReference",
     "ReferenceCandidateMatch",
     "QuerySnapshot",
+    "ScenarioBundleItem",
+    "ScenarioRequest",
+    "ScenarioSlotSpec",
+    "ScenarioSnapshot",
     "SemanticTermOperation",
     "SlotOperation",
+    "SolutionRecipe",
     "TurnCandidateSummary",
     "TurnQuery",
 ]
