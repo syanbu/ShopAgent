@@ -1,8 +1,8 @@
 # 安卓客户端（流式对话导购）
 
-> 状态：提议
+> 状态：开发中
 >
-> 代码入口：尚未创建，规划见 [../plan.md](../plan.md)
+> 代码入口：`app/src/main/java/com/shopagent/`（`MainActivity.kt`、`ui/ChatScreen.kt`、`ui/ChatViewModel.kt`、`ui/components/`、`data/ChatApi.kt`、`data/ChatRepository.kt`、`domain/ChatMessage.kt`），单元测试在 `app/src/test/java/com/shopagent/`
 
 ## 功能目标
 
@@ -59,7 +59,7 @@
 
 ## 代码与验证
 
-代码尚未创建，目录结构规划见 [../plan.md](../plan.md)：`data/`（ChatApi、dto、ChatRepository）、`domain/`（ChatMessage）、`ui/`（ChatViewModel、ChatScreen、ProductCard、SkuStack 等组件）。
+代码位于 `app/src/main/java/com/shopagent/`，结构与 [../plan.md](../plan.md) 一致：`data/`（ChatApi、dto、ChatRepository）、`domain/`（ChatMessage）、`ui/`（ChatViewModel、ChatScreen、`components/` 下的 MessageBubble/ProductCard/SkuStack）；另有 `ui/cart/CartScreen.kt`、`ui/profile/ProfileScreen.kt` 两个占位页，由 `MainActivity` 底部导航（Material 3 NavigationBar + 状态切换，未引入 navigation-compose）切换。
 
 验证方式（按 [../plan.md](../plan.md) 测试计划）：
 
@@ -71,3 +71,4 @@
 | 日期 | 变更 | 原因 |
 |---|---|---|
 | 2026-08-05 | 创建功能文档；背景与计划文档迁入 `android/docs/` | 客户端文档独立成册，仿照后端 docs 结构组织 |
+| 2026-08-05 | 实现 Phase 1 + Phase 2：流式对话、商品卡片、SKU 堆叠、底部导航三界面；状态由「提议」转「开发中」 | 首个可运行版本，单元测试覆盖 DTO 反序列化 / 事件聚合 / ViewModel 状态迁移 |

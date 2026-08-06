@@ -16,7 +16,7 @@
 
 | 功能 | 状态 | 功能文档 | 代码入口 |
 |---|---|---|---|
-| 安卓客户端（流式对话导购、商品卡片、SKU 堆叠） | 提议 | [features/android-client.md](features/android-client.md) | 尚未创建，规划见 [plan.md](plan.md) |
+| 安卓客户端（流式对话导购、商品卡片、SKU 堆叠） | 开发中 | [features/android-client.md](features/android-client.md) | `app/src/main/java/com/shopagent/`（`MainActivity.kt`、`ui/ChatScreen.kt`、`ui/ChatViewModel.kt`、`data/ChatRepository.kt`、`data/ChatApi.kt`） |
 
 ## 更新规则
 
