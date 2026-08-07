@@ -5,9 +5,22 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 
-private val LightColors = lightColorScheme()
-private val DarkColors = darkColorScheme()
+// 仿豆包配色：用户气泡用高饱和蓝，助手气泡用浅灰，页面白底
+private val DoubaoBlue = Color(0xFF2B6CF2)
+private val DoubaoBlueDark = Color(0xFF6B97FF)
+private val AssistantBubbleGray = Color(0xFFF2F3F5)
+
+private val LightColors = lightColorScheme(
+    primary = DoubaoBlue,
+    onPrimary = Color.White,
+    surfaceVariant = AssistantBubbleGray,
+)
+
+private val DarkColors = darkColorScheme(
+    primary = DoubaoBlueDark,
+)
 
 @Composable
 fun ShopAgentTheme(

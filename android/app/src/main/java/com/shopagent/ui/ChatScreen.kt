@@ -1,33 +1,23 @@
 package com.shopagent.ui
 
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.shopagent.domain.ChatMessage
+import com.shopagent.ui.components.FloatingInputBar
 import com.shopagent.ui.components.MessageBubble
 
 @Composable
@@ -36,31 +26,32 @@ fun ChatScreen(
     modifier: Modifier = Modifier,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    // 新内容到达时滚到底部
-    LaunchedEffect(uiState.messages.lastOrNull()?.let { it.id to (it as? com.shopagent.domain.ChatMessage.Assistant)?.text?.length }) {
+    // reverseLayout 下 index 0 即最新消息：新内容到达时回到底部
+    LaunchedEffect(uiState.messages.lastOrNull()?.let { it.id to (it as? ChatMessage.Assistant)?.text?.length }) {
         if (uiState.messages.isNotEmpty()) {
-            listState.animateScrollToItem(uiState.messages.lastIndex)
+            listState.animateScrollToItem(0)
         }
     }
 
-    Column(modifier = modifier.fillMaxSize().imePadding()) {
+    // imePadding 作用在整个 Box 上：键盘弹出时列表与输入栏一起上抬。
+    // 配合 reverseLayout 的底部锚定，视口收缩时最新消息自然保持在输入栏上方
+    Box(modifier = modifier.fillMaxSize().imePadding()) {
         LazyColumn(
             state = listState,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            reverseLayout = true,
+            // 底部预留悬浮输入栏高度，最后一条消息不被遮挡
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 88.dp),
+            modifier = Modifier.fillMaxSize(),
         ) {
             items(
-                items = uiState.messages,
+                items = uiState.messages.asReversed(),
                 key = { it.id },
                 contentType = {
                     when (it) {
-                        is com.shopagent.domain.ChatMessage.User -> "user"
-                        is com.shopagent.domain.ChatMessage.Assistant -> "assistant"
+                        is ChatMessage.User -> "user"
+                        is ChatMessage.Assistant -> "assistant"
                     }
                 },
             ) { message ->
@@ -72,29 +63,12 @@ fun ChatScreen(
             }
         }
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
+        FloatingInputBar(
+            isStreaming = uiState.isStreaming,
+            onSend = viewModel::send,
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                shape = RoundedCornerShape(24.dp),
-                maxLines = 4,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            FilledIconButton(
-                onClick = {
-                    viewModel.send(input)
-                    input = ""
-                },
-                enabled = input.isNotBlank() && !uiState.isStreaming,
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
-            }
-        }
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth(),
+        )
     }
 }

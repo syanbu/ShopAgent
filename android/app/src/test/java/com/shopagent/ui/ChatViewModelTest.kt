@@ -8,12 +8,16 @@ import com.shopagent.data.dto.MessageEndDto
 import com.shopagent.data.dto.MessageStartDto
 import com.shopagent.data.dto.SseEvent
 import com.shopagent.data.dto.TextDeltaDto
+import com.shopagent.data.local.ConversationStore
+import com.shopagent.data.local.ConversationSummary
 import com.shopagent.domain.ChatMessage
 import com.shopagent.domain.MessageStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -42,11 +46,30 @@ private class ScriptedStreamSource : ChatStreamSource {
     }
 }
 
+/** 内存版会话存储，记录保存内容并维护列表 Flow */
+private class FakeConversationStore : ConversationStore {
+    val saved = LinkedHashMap<String, List<ChatMessage>>()
+    private val summaries = MutableStateFlow<List<ConversationSummary>>(emptyList())
+
+    override fun observeConversations(): Flow<List<ConversationSummary>> = summaries
+
+    override suspend fun saveConversation(conversationId: String, messages: List<ChatMessage>) {
+        saved[conversationId] = messages
+        val title = messages.filterIsInstance<ChatMessage.User>().firstOrNull()?.text?.take(20) ?: ""
+        summaries.value = summaries.value.filter { it.id != conversationId } +
+            ConversationSummary(id = conversationId, title = title, updatedAt = 0L)
+    }
+
+    override suspend fun loadMessages(conversationId: String): List<ChatMessage> =
+        saved[conversationId] ?: emptyList()
+}
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest {
 
     private val dispatcher = StandardTestDispatcher()
     private lateinit var source: ScriptedStreamSource
+    private lateinit var store: FakeConversationStore
     private lateinit var viewModel: ChatViewModel
 
     private fun messageStart(convId: String = "conv-1") =
@@ -59,7 +82,8 @@ class ChatViewModelTest {
     fun setUp() {
         Dispatchers.setMain(dispatcher)
         source = ScriptedStreamSource()
-        viewModel = ChatViewModel(ChatRepository(source))
+        store = FakeConversationStore()
+        viewModel = ChatViewModel(ChatRepository(source), store)
     }
 
     @After
@@ -186,5 +210,93 @@ class ChatViewModelTest {
         advanceUntilIdle()
         assertTrue(viewModel.uiState.value.messages.isEmpty())
         assertTrue(source.requests.isEmpty())
+    }
+
+    @Test
+    fun `新会话清空消息并复位 conversation_id`() = runTest(dispatcher) {
+        source.enqueue(listOf(messageStart("conv-abc"), messageEnd("completed")))
+        viewModel.send("旧会话消息")
+        advanceUntilIdle()
+        assertEquals(2, viewModel.uiState.value.messages.size)
+
+        viewModel.newConversation()
+
+        val cleared = viewModel.uiState.value
+        assertTrue(cleared.messages.isEmpty())
+        assertTrue(!cleared.isStreaming)
+
+        // 新会话的首条请求不再携带旧 conversation_id，与旧会话隔离
+        source.enqueue(listOf(messageStart("conv-new"), messageEnd("completed")))
+        viewModel.send("新会话消息")
+        advanceUntilIdle()
+
+        assertEquals(2, source.requests.size)
+        assertNull(source.requests[0].conversationId)
+        assertNull(source.requests[1].conversationId)
+        assertEquals(2, viewModel.uiState.value.messages.size)
+    }
+
+    @Test
+    fun `一轮结束后会话自动保存到本地`() = runTest(dispatcher) {
+        // conversations 是 WhileSubscribed 共享流，需有收集者才会更新
+        backgroundScope.launch { viewModel.conversations.collect { } }
+        source.enqueue(
+            listOf(
+                messageStart("conv-abc"),
+                SseEvent.TextDelta(TextDeltaDto("推荐这款")),
+                messageEnd("completed"),
+            ),
+        )
+
+        viewModel.send("推荐洗面奶")
+        advanceUntilIdle()
+
+        val saved = store.saved["conv-abc"]
+        assertNotNull(saved)
+        assertEquals(2, saved!!.size)
+        assertTrue(saved[0] is ChatMessage.User)
+        val assistant = saved[1] as ChatMessage.Assistant
+        assertEquals(MessageStatus.Done, assistant.status)
+        assertEquals("推荐洗面奶", viewModel.conversations.value.single().title)
+    }
+
+    @Test
+    fun `打开历史会话恢复消息并携带原 conversation_id 继续聊`() = runTest(dispatcher) {
+        source.enqueue(listOf(messageStart("conv-abc"), messageEnd("completed")))
+        viewModel.send("旧会话消息")
+        advanceUntilIdle()
+
+        viewModel.newConversation()
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.messages.isEmpty())
+
+        viewModel.openConversation("conv-abc")
+        advanceUntilIdle()
+
+        val restored = viewModel.uiState.value
+        assertEquals(2, restored.messages.size)
+        assertEquals("旧会话消息", (restored.messages[0] as ChatMessage.User).text)
+        assertEquals("conv-abc", viewModel.conversationId.value)
+
+        // 在历史会话里继续发送，请求携带原 conversation_id
+        source.enqueue(listOf(messageStart("conv-abc"), messageEnd("completed")))
+        viewModel.send("接着问")
+        advanceUntilIdle()
+        assertEquals("conv-abc", source.requests.last().conversationId)
+        assertEquals(4, viewModel.uiState.value.messages.size)
+    }
+
+    @Test
+    fun `新会话不影响已保存的历史记录`() = runTest(dispatcher) {
+        backgroundScope.launch { viewModel.conversations.collect { } }
+        source.enqueue(listOf(messageStart("conv-abc"), messageEnd("completed")))
+        viewModel.send("旧会话消息")
+        advanceUntilIdle()
+
+        viewModel.newConversation()
+        advanceUntilIdle()
+
+        assertTrue(store.saved.containsKey("conv-abc"))
+        assertEquals(1, viewModel.conversations.value.size)
     }
 }

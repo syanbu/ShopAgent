@@ -1,5 +1,7 @@
 package com.shopagent.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,12 +11,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.shopagent.domain.ChatMessage
 import com.shopagent.domain.MessageStatus
@@ -31,25 +41,49 @@ fun MessageBubble(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UserBubble(
     message: ChatMessage.User,
     modifier: Modifier = Modifier,
 ) {
+    val clipboardManager = LocalClipboardManager.current
+    var menuExpanded by remember { mutableStateOf(false) }
+
     Box(modifier = modifier.fillMaxWidth()) {
-        Surface(
-            color = MaterialTheme.colorScheme.primary,
-            shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
+        // 外层 Box 作为 DropdownMenu 的锚点，长按气泡弹出操作菜单
+        Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .widthIn(max = 300.dp),
         ) {
-            Text(
-                text = message.text,
-                color = MaterialTheme.colorScheme.onPrimary,
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            )
+            Surface(
+                color = MaterialTheme.colorScheme.primary,
+                shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
+                modifier = Modifier.combinedClickable(
+                    onClick = {},
+                    onLongClick = { menuExpanded = true },
+                ),
+            ) {
+                Text(
+                    text = message.text,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("复制") },
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(message.text))
+                        menuExpanded = false
+                    },
+                )
+            }
         }
     }
 }
@@ -79,14 +113,21 @@ private fun AssistantBubble(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                 )
             }
+        } else if (message.status == MessageStatus.Streaming) {
+            // 回复尚未产出内容时，用仿豆包的三点跳动气泡占位
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
+            ) {
+                TypingIndicator(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp))
+            }
         }
 
         when (message.status) {
-            MessageStatus.Streaming -> Text(
-                text = "正在输入…",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // 已有部分内容仍在流式输出时，文本下方继续显示三点动画
+            MessageStatus.Streaming -> if (message.text.isNotEmpty()) {
+                TypingIndicator(modifier = Modifier.padding(start = 4.dp))
+            }
             MessageStatus.Partial -> Text(
                 text = "回复不完整",
                 style = MaterialTheme.typography.labelSmall,

@@ -15,7 +15,7 @@
 | 架构 | MVVM，手动依赖注入 | 单 Repository + ViewModelFactory，不引入 Hilt |
 | 最低版本 | minSdk 26 | 覆盖主流设备，协程/Compose 无兼容负担 |
 
-不引入 Retrofit（对 SSE 无帮助）、Room（Phase 3 再评估）。
+不引入 Retrofit（对 SSE 无帮助）。Room 已在会话持久化阶段引入（KSP 编译，见 `data/local/`）。
 
 ## 目录结构
 
@@ -28,17 +28,25 @@ android/
 │       │   ├── dto/                    # 与后端事件对齐的 DTO
 │       │   │   ├── ChatRequest.kt
 │       │   │   └── SseEvents.kt        # message_start/product/text_delta/error/message_end
+│       │   ├── local/                  # Room 会话持久化
+│       │   │   ├── AppDatabase.kt
+│       │   │   ├── Entities.kt         # conversations / messages 两张表
+│       │   │   ├── ConversationDao.kt
+│       │   │   ├── ConversationStore.kt    # 持久化接口（测试用内存 fake）
+│       │   │   └── RoomConversationStore.kt
 │       │   └── ChatRepository.kt       # 事件流 → 消息聚合
 │       ├── domain/
 │       │   └── ChatMessage.kt          # 消息模型（见下）
 │       ├── ui/
 │       │   ├── ChatViewModel.kt        # StateFlow<ChatUiState>
-│       │   ├── ChatScreen.kt           # LazyColumn 对话列表 + 输入栏
+│       │   ├── ChatScreen.kt           # LazyColumn 对话列表 + 悬浮输入栏
+│       │   ├── AppDrawer.kt            # 侧边抽屉（功能项/历史会话占位/用户行）
 │       │   └── components/
 │       │       ├── MessageBubble.kt    # 用户/助手气泡 + 流式文本
 │       │       ├── ProductCard.kt      # 图片/标题/品牌/双价格 + SkuStack
+│       │       ├── FloatingInputBar.kt # 悬浮无边框输入胶囊
 │       │       └── SkuStack.kt         # SKU 堆叠组件（见下）
-│       └── MainActivity.kt
+│       └── MainActivity.kt             # ModalNavigationDrawer + TopAppBar
 └── app/src/test/                       # 单元测试
 ```
 
@@ -109,7 +117,11 @@ Coil AsyncImage ←── image_url (GET /api/v1/products/{id}/image)
 
 - 会话历史进程内保持 + 冷启动空态。
 - 加载态（发送后等待 `message_start`）、流式光标动画。
-- 视情况引入 Room 持久化（单独评估，不在本期承诺）。
+
+### Phase 4：会话持久化（已完成）
+
+- 引入 Room（KSP），本地保存会话与消息；抽屉历史会话列表点击载入，恢复 `conversation_id` 可继续聊。
+- 验收：杀进程重启后历史会话仍在；打开历史会话消息完整（含商品卡片）；在历史会话中发送消息携带原 `conversation_id`。
 
 ## 测试计划
 
