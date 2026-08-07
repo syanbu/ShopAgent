@@ -64,8 +64,7 @@ Point ID 根据 `chunk_id` 稳定生成，重复执行会覆盖同一 Chunk。�
 ## 启动 Agent API
 
 ```bash
-env -u ALL_PROXY -u all_proxy \
-  uv run uvicorn shop_agent.api.app:app \
+uv run uvicorn shop_agent.api.app:app \
   --host 127.0.0.1 \
   --port 8000 \
   --reload
