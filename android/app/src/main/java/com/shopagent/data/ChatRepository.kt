@@ -118,6 +118,7 @@ class ChatRepository(
         displayPrice = displayPrice,
         matchedSkus = matchedSkus.map { it.toDomain() },
         imageUrl = imageUrl,
+        description = description,
     )
 
     private fun SkuDto.toDomain(): Sku = Sku(

@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -44,6 +45,17 @@ class ChatViewModel(
     private var streamJob: Job? = null
     private var persistJob: Job? = null
 
+    init {
+        // 冷启动恢复最近会话：历史列表按更新时间倒序，首条即最近会话
+        viewModelScope.launch {
+            val latest = store.observeConversations().first().firstOrNull() ?: return@launch
+            openConversation(latest.id)
+        }
+    }
+
+    /** 有新消息落库前为 true；纯查看历史会话不刷新其排序位置 */
+    private var hasUnsavedChanges = false
+
     /** 最近一次发送的用户文本，供 retryable 错误重试 */
     private var lastUserText: String? = null
 
@@ -57,6 +69,7 @@ class ChatViewModel(
         streamJob = null
         _conversationId.value = null
         lastUserText = null
+        hasUnsavedChanges = false
         _uiState.value = ChatUiState()
     }
 
@@ -71,6 +84,8 @@ class ChatViewModel(
             _conversationId.value = id
             // 恢复最后一条用户文本，让历史会话里的 retryable 失败仍可重试
             lastUserText = messages.filterIsInstance<ChatMessage.User>().lastOrNull()?.text
+            // 载入的内容与本地库一致，标记为无需保存
+            hasUnsavedChanges = false
             _uiState.value = ChatUiState(messages = messages)
         }
     }
@@ -126,6 +141,7 @@ class ChatViewModel(
                         }
                         // 一轮结束（含失败/partial）即落库；流式中途不写
                         if (update.message.status != MessageStatus.Streaming) {
+                            hasUnsavedChanges = true
                             persist()
                         }
                     }
@@ -134,11 +150,17 @@ class ChatViewModel(
         }
     }
 
-    /** 整体覆盖保存当前会话；未建立会话或无消息时跳过 */
+    /**
+     * 整体覆盖保存当前会话。只在有新消息（一轮对话结束）时真正写库：
+     * 打开/离开会话时的兜底调用若原样写入，会把 updatedAt 刷成当前时间，
+     * 导致仅被查看的会话跳到历史列表顶部。
+     */
     private fun persist() {
+        if (!hasUnsavedChanges) return
         val id = _conversationId.value ?: return
         val messages = _uiState.value.messages
         if (messages.isEmpty()) return
+        hasUnsavedChanges = false
         persistJob?.cancel()
         persistJob = viewModelScope.launch {
             store.saveConversation(id, messages)

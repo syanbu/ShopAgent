@@ -103,6 +103,7 @@ async def test_scenario_chat_keeps_request_and_product_event_contracts(
         "display_price",
         "matched_skus",
         "image_url",
+        "description",
     }
     assert all(set(event.data) == expected_fields for event in events[1:6])
     assert [event.data["rank"] for event in events[1:6]] == [1, 2, 3, 4, 5]

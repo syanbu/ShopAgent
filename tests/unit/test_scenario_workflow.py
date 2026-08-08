@@ -245,3 +245,14 @@ async def test_required_slot_exhaustion_emits_no_cards_and_preserves_bundle() ->
     assert next_repository.saves == []
     assert next_repository.record is not None
     assert next_repository.record.state.scenario_snapshot == exhausted_snapshot
+
+
+@pytest.mark.asyncio
+async def test_scenario_response_prompt_requires_markdown_list() -> None:
+    dependencies, _ = _dependencies(turns=[_scenario_turn()])
+
+    await _events(dependencies, "下周去三亚度假，从防晒到穿搭")
+
+    prompt = dependencies.response_generator.prompts[0]
+    assert "按槽位顺序" in prompt
+    assert "无序列表项（- 开头），商品名称与价格用 ** 加粗" in prompt

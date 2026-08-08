@@ -1,6 +1,7 @@
 package com.shopagent.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,21 +17,43 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.SubcomposeAsyncImage
+import coil.compose.AsyncImage
+import coil.imageLoader
+import coil.request.ImageRequest
 import com.shopagent.domain.ProductCard as ProductCardModel
 
-/** 商品卡片横向列表，按 rank 排序 */
+/** 商品卡片横向列表，按 rank 排序；点击卡片弹出商品详情 BottomSheet */
 @Composable
 fun ProductCardRow(
     products: List<ProductCardModel>,
     modifier: Modifier = Modifier,
 ) {
+    var selectedProduct by remember { mutableStateOf<ProductCardModel?>(null) }
+
+    // 预热：提前把卡片图拉进 Coil 内存/磁盘缓存，减少横滑与详情弹窗的占位闪烁
+    val context = LocalContext.current
+    LaunchedEffect(products) {
+        products.forEach { product ->
+            product.imageUrl?.let { url ->
+                context.imageLoader.enqueue(
+                    ImageRequest.Builder(context).data(url).build(),
+                )
+            }
+        }
+    }
+
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
@@ -40,28 +63,48 @@ fun ProductCardRow(
             items = products.sortedBy { it.rank },
             key = { it.productId },
         ) { product ->
-            ProductCard(product = product)
+            ProductCard(
+                product = product,
+                onClick = { selectedProduct = product },
+            )
         }
+    }
+
+    selectedProduct?.let { product ->
+        ProductDetailSheet(
+            product = product,
+            onDismiss = { selectedProduct = null },
+        )
     }
 }
 
 @Composable
 fun ProductCard(
     product: ProductCardModel,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Card(modifier = modifier.width(200.dp)) {
+    Card(
+        modifier = modifier
+            .width(200.dp)
+            .clickable(onClick = onClick),
+    ) {
         Column {
-            SubcomposeAsyncImage(
-                model = product.imageUrl,
-                contentDescription = product.title,
-                contentScale = ContentScale.Crop,
-                loading = { ImagePlaceholder() },
-                error = { ImagePlaceholder() },
+            // 占位图衬底 + AsyncImage 覆盖：缓存命中时首帧直接出图，
+            // 避免 SubcomposeAsyncImage 子组合导致的占位闪烁
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f),
-            )
+            ) {
+                ImagePlaceholder()
+                AsyncImage(
+                    model = product.imageUrl,
+                    contentDescription = product.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             Column(modifier = Modifier.padding(10.dp)) {
                 Text(
                     text = product.title,
@@ -90,10 +133,14 @@ fun ProductCard(
                         textDecoration = TextDecoration.LineThrough,
                     )
                 }
-                SkuStack(
-                    skus = product.matchedSkus,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
+                if (product.matchedSkus.isNotEmpty()) {
+                    Text(
+                        text = "共 ${product.matchedSkus.size} 个 SKU，点击查看",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
             }
         }
     }
@@ -101,7 +148,7 @@ fun ProductCard(
 
 /** image_url 为 null 或加载失败时的占位图 */
 @Composable
-private fun ImagePlaceholder() {
+internal fun ImagePlaceholder() {
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier

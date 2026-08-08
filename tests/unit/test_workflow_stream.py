@@ -89,6 +89,7 @@ async def test_product_event_uses_catalog_facts_and_matched_skus(
             }
         ],
         "image_url": "http://testserver/api/v1/products/p1/image",
+        "description": "测试商品",
     }
 
 
@@ -167,6 +168,7 @@ async def test_verified_prompt_contains_only_selected_evidence(tmp_path: Path) -
     assert "不得" in prompt
     assert "可用商品信息" in prompt
     assert "简洁、自然地说明推荐理由" in prompt
+    assert "每款商品一个无序列表项（- 开头），商品名称与价格用 ** 加粗" in prompt
     assert "已校验事实" not in prompt
 
 

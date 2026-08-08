@@ -29,7 +29,7 @@ SSE 流式对话接口，`Content-Type: text/event-stream`。
 |---|---|---|
 | `message_start` | `request_id`, `conversation_id` | 首个事件；`conversation_id` 需保存用于后续多轮请求 |
 | `product` | 见下 | 商品卡片数据，**先于推荐文本到达** |
-| `text_delta` | `delta` | 大模型推荐文本增量，逐段追加 |
+| `text_delta` | `delta` | 大模型推荐文本增量（Markdown 格式：无序列表、`**` 加粗），逐段追加 |
 | `error` | `code`, `message`, `retryable` | 业务错误；`retryable` 决定是否可重试 |
 | `message_end` | `request_id`, `status` | `status` 为 `completed` / `partial` / `failed` |
 
@@ -46,14 +46,15 @@ SSE 流式对话接口，`Content-Type: text/event-stream`。
   "matched_skus": [
     {"sku_id": "sku_xxx", "properties": {"颜色": "曜石黑", "容量": "256GB"}, "price": 3599.0}
   ],
-  "image_url": "http://<host>/api/v1/products/p_digital_008/image"
+  "image_url": "http://<host>/api/v1/products/p_digital_008/image",
+  "description": "商品摘要文案"
 }
 ```
 
 - `display_price` 为符合当前条件的最低 SKU 价，`base_price` 为数据集原始基础价，两者可同时展示。
 - `matched_skus` 只包含符合当前对话条件的 SKU，可能多于一个，也可能只有一个。
 - `image_url` 可能为 `null`（图片文件不存在），客户端需有占位图。
-- **没有商品描述字段**。商品描述由大模型的流式推荐文本（`text_delta`）承载，卡片上不展示结构化描述。
+- `description` 为商品摘要，取自数据集 `rag_knowledge.marketing_description`，客户端在商品详情弹窗展示。
 
 错误码包括：`INTENT_PARSE_FAILED`、`EVIDENCE_PARSE_FAILED`、`EMBEDDING_UNAVAILABLE`、`RETRIEVAL_UNAVAILABLE`、`RERANK_UNAVAILABLE`、`GENERATION_FAILED`、`INTERNAL_ERROR`。
 

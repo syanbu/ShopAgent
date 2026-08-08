@@ -95,7 +95,7 @@ SSE 响应的 `Content-Type` 为 `text/event-stream`。各事件的数据结构�
 | 事件 | 数据字段 |
 |---|---|
 | `message_start` | `request_id`、`conversation_id` |
-| `product` | 排名、商品事实、符合当前条件的 SKU 和图片 URL |
+| `product` | 排名、商品事实、商品摘要、符合当前条件的 SKU 和图片 URL |
 | `text_delta` | 本次新增的文本 `delta` |
 | `error` | `code`、`message`、`retryable` |
 | `message_end` | `request_id`、`status`，状态为 `completed`、`partial` 或 `failed` |
@@ -111,11 +111,12 @@ SSE 响应的 `Content-Type` 为 `text/event-stream`。各事件的数据结构�
   "base_price": 499.0,
   "display_price": 499.0,
   "matched_skus": [],
-  "image_url": "http://127.0.0.1:8000/api/v1/products/p_digital_008/image"
+  "image_url": "http://127.0.0.1:8000/api/v1/products/p_digital_008/image",
+  "description": "商品摘要文案"
 }
 ```
 
-商品事件由代码从原始 JSON 组装，在推荐文本之前返回。`display_price` 取符合当前条件的最低 SKU 价格，`base_price` 保留数据集原值。图片接口根据 `product_id` 查询 JSON 中的相对路径并返回本地文件，不在 SSE 中传输 Base64。图片不存在时 `image_url` 为 `null`。自然语言生成失败时，已经发送的商品事件仍然有效，结束事件的 `status` 为 `partial`。
+商品事件由代码从原始 JSON 组装，在推荐文本之前返回。`display_price` 取符合当前条件的最低 SKU 价格，`base_price` 保留数据集原值。`description` 取自数据集 `rag_knowledge.marketing_description`，随商品事件一并下发。图片接口根据 `product_id` 查询 JSON 中的相对路径并返回本地文件，不在 SSE 中传输 Base64。图片不存在时 `image_url` 为 `null`。自然语言生成失败时，已经发送的商品事件仍然有效，结束事件的 `status` 为 `partial`。
 
 无匹配商品属于正常结果，不发送 `product` 事件。外部模型、Embedding、Qdrant 或重排序服务失败时返回 `error` 事件，并以 `message_end` 结束。错误码包括 `INTENT_PARSE_FAILED`、`EVIDENCE_PARSE_FAILED`、`EMBEDDING_UNAVAILABLE`、`RETRIEVAL_UNAVAILABLE`、`RERANK_UNAVAILABLE`、`GENERATION_FAILED` 和 `INTERNAL_ERROR`。系统不得在依赖失败时改为无检索的模型推荐。
 
@@ -286,7 +287,9 @@ Catalog 启动加载时按 `category + sub_category` 建立只读价格基准。
 内部处理过程，也不使用“根据已校验事实”等内部审计口吻。存在商品标题时优先用标题
 或用户的自然称呼作主语；整数金额不保留 `.0`，非整数金额最多保留两位小数。这是
 模型生成契约而不是流式文本后处理：系统继续原样转发模型增量，不缓存完整回答，也不
-对已发送文本做短语替换。
+对已发送文本做短语替换。生成文本使用 Markdown：每款商品一个无序列表项（`- ` 开头），
+商品名称与价格用 `**` 加粗，由客户端负责渲染；`scripts/chat_client.py` 等纯文本终端会
+原样显示标记符号。
 
 ## 外部依赖与配置
 
@@ -416,3 +419,5 @@ Unicode 分隔符。用户提供的关联标识不能拆分或伪造额外日志
 | 2026-07-25 | 明确语义证据的宽松准入规则 | 必需与排除条件统一保留 `supported` 和 `unknown` 候选，只淘汰 `contradicted`；评分与优先级调整留待后续设计 |
 | 2026-07-25 | 将候选证据判断改为单轮最多五个并发调用 | 重叠等待最多十个独立模型请求，保持模型调用次数、候选顺序、三态准入和错误语义不变 |
 | 2026-07-27 | 扩充手机与真无线耳机事实数据 | 商品总量增至112款，并同步手机价格基准与连续推荐可用候选 |
+| 2026-08-09 | 商品事件新增 `description` 摘要字段 | 取自数据集 `rag_knowledge.marketing_description`，供客户端商品详情弹窗展示 |
+| 2026-08-09 | 推荐回复提示词新增 Markdown 格式契约：每款商品一个无序列表项，商品名称与价格加粗 | 纯散文段落可读性差；格式由提示词约束、客户端渲染，生成与流式转发逻辑不变 |

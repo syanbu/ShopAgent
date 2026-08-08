@@ -43,9 +43,9 @@ android/
 │       │   ├── AppDrawer.kt            # 侧边抽屉（功能项/历史会话占位/用户行）
 │       │   └── components/
 │       │       ├── MessageBubble.kt    # 用户/助手气泡 + 流式文本
-│       │       ├── ProductCard.kt      # 图片/标题/品牌/双价格 + SkuStack
-│       │       ├── FloatingInputBar.kt # 悬浮无边框输入胶囊
-│       │       └── SkuStack.kt         # SKU 堆叠组件（见下）
+│       │       ├── ProductCard.kt      # 图片/标题/品牌/双价格 + SKU 数量提示，点击弹详情
+│       │       ├── ProductDetailSheet.kt # 商品详情 BottomSheet（见下）
+│       │       └── FloatingInputBar.kt # 悬浮无边框输入胶囊
 │       └── MainActivity.kt             # ModalNavigationDrawer + TopAppBar
 └── app/src/test/                       # 单元测试
 ```
@@ -85,18 +85,17 @@ Coil AsyncImage ←── image_url (GET /api/v1/products/{id}/image)
 
 单向数据流，无环。Repository 把 SSE 事件回调转为 Flow，ViewModel 收集后reduce 进 `ChatUiState`。
 
-## SKU 堆叠组件（SkuStack）
+## 商品详情弹窗（ProductDetailSheet）
 
-- 折叠态：Compose `Box` 中多张 SKU 卡按索引做 `offset(y = index * 6.dp)` + 轻微旋转（`-2°..2°` 交替）+ 缩放（`1 - index * 0.03`），只完整露出顶层卡（显示 `properties` 摘要和 `price`），边缘露出下层形成堆叠感；右上角角标显示 SKU 数量。
-- 展开态：点击整叠，`AnimatedVisibility` 展开为竖向列表，每卡展示 `properties` 全部键值对 + `price`；再次点击或点击空白处收起。
-- 单 SKU 时退化为普通单卡，不做堆叠。
-- 不做拖拽翻牌手势（首版范围外）。
+- 点击商品卡片弹出 `ModalBottomSheet`，下滑或点击空白处关闭；弹出状态由 `ProductCardRow` 持有（`selectedProduct`）。
+- 内容纵向可滚动：商品大图（4:3 裁切，加载失败用占位图）、标题、品牌、描述（`description` 占位字段，未下发时显示"暂无商品描述"）、`display_price` 主价格 + `base_price` 删除线、完整 SKU 列表（每条展示 `properties` 全部键值对摘要 + `price`）。
+- SKU 不在卡片内联展开（曾用 AnimatedVisibility 内联展开，会撑高卡片、顶开聊天列表，已废弃）。
 
 ## 商品卡片（ProductCard）
 
 - 横向一行多张卡片（`LazyRow`），按 `rank` 排序。
-- 卡片内容：Coil 加载 `image_url`（`null` 时用占位图）、标题、品牌、`display_price` 为主价格，`base_price` 不同则以删除线小字展示。
-- 卡片下方嵌 SkuStack。
+- 卡片内容：Coil 加载 `image_url`（`null` 时用占位图）、标题、品牌、`display_price` 为主价格，`base_price` 不同则以删除线小字展示；有 SKU 时底部显示"共 N 个 SKU，点击查看"提示。
+- 点击卡片弹出 ProductDetailSheet。
 
 ## 阶段拆分
 
@@ -109,19 +108,20 @@ Coil AsyncImage ←── image_url (GET /api/v1/products/{id}/image)
 
 ### Phase 2：商品卡片 + SKU 堆叠
 
-- ProductCard + ProductCardRow + SkuStack。
+- ProductCard + ProductCardRow + ProductDetailSheet。
 - Coil 图片加载与占位图。
-- 验收：同一请求下卡片先于文本出现、多 SKU 商品堆叠可展开、`image_url=null` 时占位图正常。
+- 验收：同一请求下卡片先于文本出现、点击卡片弹出详情 BottomSheet 展示完整 SKU 列表、`image_url=null` 时占位图正常。
 
 ### Phase 3：打磨
 
-- 会话历史进程内保持 + 冷启动空态。
+- 会话历史进程内保持。
 - 加载态（发送后等待 `message_start`）、流式光标动画。
 
 ### Phase 4：会话持久化（已完成）
 
 - 引入 Room（KSP），本地保存会话与消息；抽屉历史会话列表点击载入，恢复 `conversation_id` 可继续聊。
-- 验收：杀进程重启后历史会话仍在；打开历史会话消息完整（含商品卡片）；在历史会话中发送消息携带原 `conversation_id`。
+- 冷启动自动恢复最近会话（历史列表按 `updatedAt` 倒序，首条即最近会话）；无历史时为空白新会话。
+- 验收：杀进程重启后历史会话仍在且自动进入最近会话；打开历史会话消息完整（含商品卡片）；在历史会话中发送消息携带原 `conversation_id`。
 
 ## 测试计划
 

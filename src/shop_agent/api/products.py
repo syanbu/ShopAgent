@@ -18,4 +18,9 @@ async def product_image(product_id: str, dependencies: Dependencies) -> FileResp
     if not path.is_file():
         raise HTTPException(status_code=404, detail="product image not found")
     media_type, _ = mimetypes.guess_type(path.name)
-    return FileResponse(path, media_type=media_type or "application/octet-stream")
+    # 图片按 product_id 静态存放，允许客户端磁盘缓存长期命中，避免冷启动回源验证
+    return FileResponse(
+        path,
+        media_type=media_type or "application/octet-stream",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

@@ -102,6 +102,7 @@ class RoomConversationStore(
         displayPrice = displayPrice,
         matchedSkus = matchedSkus.map { SkuDto(skuId = it.skuId, properties = it.properties, price = it.price) },
         imageUrl = imageUrl,
+        description = description,
     )
 
     private fun ProductDto.toDomain() = ProductCard(
@@ -113,6 +114,7 @@ class RoomConversationStore(
         displayPrice = displayPrice,
         matchedSkus = matchedSkus.map { Sku(skuId = it.skuId, properties = it.properties, price = it.price) },
         imageUrl = imageUrl,
+        description = description,
     )
 
     private fun ChatError.toDto() = ErrorDto(code = code, message = message, retryable = retryable)

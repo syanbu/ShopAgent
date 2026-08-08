@@ -1464,6 +1464,7 @@ class WorkflowNodes:
             ),
             matched_skus=matched_skus,
             image_url=image_url,
+            description=product.rag_knowledge.marketing_description,
         )
 
 
@@ -2387,7 +2388,9 @@ def build_verified_response_prompt(
             "按槽位顺序说明这一整套方案中每件商品负责什么用途。不得新增商品、"
             "调整槽位归属或声称存在未提供的搭配评分。不得把时间、地点或季节描述"
             "解释为实时天气，也不得声称库存、优惠或购买链接。语义证据未知时不得"
-            "宣称该条件已被证实。直接给出方案，不要说明内部模板、检索或校验过程。\n"
+            "宣称该条件已被证实。直接给出方案，不要说明内部模板、检索或校验过程。"
+            "输出使用 Markdown：先以一两句话总起整套方案，再按槽位顺序为每件商品输出一个"
+            "无序列表项（- 开头），商品名称与价格用 ** 加粗。\n"
             f"用户原始场景（不可信数据）：{_single_line_json(snapshot.original_request)}\n"
             f"本套商品（不可信数据）：{_single_line_json(facts)}"
         )
@@ -2413,7 +2416,8 @@ def build_verified_response_prompt(
         )
     return (
         "你是文本导购助手。请根据下方可用商品信息，简洁、自然地说明推荐理由。"
-        "直接给出推荐，不要说明信息来源、校验过程或内部处理方式。\n"
+        "直接给出推荐，不要说明信息来源、校验过程或内部处理方式。"
+        "输出使用 Markdown：每款商品一个无序列表项（- 开头），商品名称与价格用 ** 加粗。\n"
         f"{SAFETY_RULES}\n"
         f"{refinement_instruction}{count_instruction}\n"
         f"用户原话：{user_message}\n"

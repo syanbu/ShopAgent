@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 仅 debug 构建使用：本地联调后端为明文 HTTP（模拟器 10.0.2.2 / 局域网真机），
+     release 构建不携带此配置，保持平台默认禁止明文流量 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

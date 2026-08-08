@@ -26,6 +26,8 @@ data class ProductDto(
     @SerialName("display_price") val displayPrice: Double,
     @SerialName("matched_skus") val matchedSkus: List<SkuDto> = emptyList(),
     @SerialName("image_url") val imageUrl: String? = null,
+    /** 商品描述，后端暂未下发，占位字段 */
+    val description: String? = null,
 )
 
 @Serializable

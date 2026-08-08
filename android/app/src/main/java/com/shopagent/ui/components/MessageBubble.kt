@@ -26,6 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import com.halilibo.richtext.commonmark.Markdown
+import com.halilibo.richtext.ui.material3.RichText
 import com.shopagent.domain.ChatMessage
 import com.shopagent.domain.MessageStatus
 
@@ -107,11 +109,12 @@ private fun AssistantBubble(
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
             ) {
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyLarge,
+                // 助手回复为 Markdown（列表/加粗），流式增量重组时重新解析
+                RichText(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                )
+                ) {
+                    Markdown(content = message.text)
+                }
             }
         } else if (message.status == MessageStatus.Streaming) {
             // 回复尚未产出内容时，用仿豆包的三点跳动气泡占位

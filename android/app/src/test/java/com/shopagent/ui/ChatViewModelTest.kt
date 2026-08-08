@@ -49,11 +49,13 @@ private class ScriptedStreamSource : ChatStreamSource {
 /** 内存版会话存储，记录保存内容并维护列表 Flow */
 private class FakeConversationStore : ConversationStore {
     val saved = LinkedHashMap<String, List<ChatMessage>>()
+    val saveCalls = mutableListOf<String>()
     private val summaries = MutableStateFlow<List<ConversationSummary>>(emptyList())
 
     override fun observeConversations(): Flow<List<ConversationSummary>> = summaries
 
     override suspend fun saveConversation(conversationId: String, messages: List<ChatMessage>) {
+        saveCalls += conversationId
         saved[conversationId] = messages
         val title = messages.filterIsInstance<ChatMessage.User>().firstOrNull()?.text?.take(20) ?: ""
         summaries.value = summaries.value.filter { it.id != conversationId } +
@@ -89,6 +91,30 @@ class ChatViewModelTest {
     @After
     fun tearDown() {
         Dispatchers.resetMain()
+    }
+
+    @Test
+    fun `冷启动恢复最近会话`() = runTest(dispatcher) {
+        val messages = listOf(
+            ChatMessage.User(id = "u1", text = "历史消息"),
+            ChatMessage.Assistant(id = "a1", text = "历史回复", status = MessageStatus.Done),
+        )
+        store.saveConversation("conv-old", messages)
+
+        val restored = ChatViewModel(ChatRepository(source), store)
+        advanceUntilIdle()
+
+        assertEquals("conv-old", restored.conversationId.value)
+        assertEquals(messages, restored.uiState.value.messages)
+        assertTrue(!restored.uiState.value.isStreaming)
+    }
+
+    @Test
+    fun `无历史会话时冷启动为空白`() = runTest(dispatcher) {
+        advanceUntilIdle()
+
+        assertNull(viewModel.conversationId.value)
+        assertTrue(viewModel.uiState.value.messages.isEmpty())
     }
 
     @Test
@@ -298,5 +324,25 @@ class ChatViewModelTest {
 
         assertTrue(store.saved.containsKey("conv-abc"))
         assertEquals(1, viewModel.conversations.value.size)
+    }
+
+    @Test
+    fun `仅查看历史会话不会重复写库刷新排序`() = runTest(dispatcher) {
+        source.enqueue(listOf(messageStart("conv-abc"), messageEnd("completed")))
+        viewModel.send("旧会话消息")
+        advanceUntilIdle()
+        // 一轮结束落库一次
+        assertEquals(1, store.saveCalls.size)
+
+        // 新会话 → 打开历史 → 再离开，全程没有新消息，不应再触发写库
+        // （否则会刷新 updatedAt，使仅被查看的会话跳到列表顶部）
+        viewModel.newConversation()
+        advanceUntilIdle()
+        viewModel.openConversation("conv-abc")
+        advanceUntilIdle()
+        viewModel.newConversation()
+        advanceUntilIdle()
+
+        assertEquals(1, store.saveCalls.size)
     }
 }

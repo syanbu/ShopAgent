@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 仅 debug 构建：放行明文 HTTP，用于 10.0.2.2 / 局域网后端联调；release 不携带 -->
+<!-- debug 构建的 manifest 叠加：只追加明文放行配置，合并进主 manifest -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
     <application
         android:networkSecurityConfig="@xml/network_security_config" />
+
 </manifest>

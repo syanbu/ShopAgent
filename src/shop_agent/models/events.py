@@ -20,6 +20,8 @@ class ProductEventData(BaseModel):
     display_price: float
     matched_skus: list[Sku]
     image_url: str | None
+    # 商品摘要，取自数据集 rag_knowledge.marketing_description
+    description: str
 
 
 class TextDeltaData(BaseModel):

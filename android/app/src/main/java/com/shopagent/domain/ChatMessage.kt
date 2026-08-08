@@ -17,6 +17,8 @@ data class ProductCard(
     val displayPrice: Double,
     val matchedSkus: List<Sku>,
     val imageUrl: String?,
+    /** 商品描述，后端暂未下发，占位字段 */
+    val description: String? = null,
 )
 
 /** 助手消息状态 */
